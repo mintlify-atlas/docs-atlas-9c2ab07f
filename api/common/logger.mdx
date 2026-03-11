@@ -1,0 +1,419 @@
+---
+title: 'Logger'
+description: 'Structured JSON logging with rotation and session tracking'
+icon: 'file-lines'
+---
+
+## Overview
+
+The logger module provides structured JSON logging with automatic file rotation and session-based tracking. All logs are output in JSON format with consistent fields for easy parsing and analysis.
+
+**File:** `common/logger.py`
+
+## Features
+
+<CardGroup cols={2}>
+  <Card title="JSON Format" icon="brackets-curly">
+    Every log line is valid JSON for easy machine parsing
+  </Card>
+  
+  <Card title="File Rotation" icon="rotate">
+    Automatic log rotation based on size with configurable backup count
+  </Card>
+  
+  <Card title="Session Tracking" icon="id-card">
+    Associate logs with specific agent sessions
+  </Card>
+  
+  <Card title="Dual Output" icon="split">
+    Logs written to both stdout and rotating files
+  </Card>
+</CardGroup>
+
+## Functions
+
+### get_logger()
+
+Get or create a JSON logger for a component with optional session tracking.
+
+```python
+get_logger(component: str, session_id: str = None) -> logging.Logger
+```
+
+<ParamField path="component" type="str" required>
+  Component name (e.g., 'agent', 'server', 'transport'). Used as log filename and in structured output.
+</ParamField>
+
+<ParamField path="session_id" type="str">
+  Optional session identifier to track logs for specific agent sessions
+</ParamField>
+
+<ResponseField name="return" type="logging.Logger">
+  Configured logger instance with JSON formatting and rotation
+</ResponseField>
+
+**Logger Configuration:**
+- Log level from `config.LOG_LEVEL` (default: INFO)
+- Dual handlers: stdout + rotating file
+- File location: `{config.LOG_DIR}/{component}.log`
+- Rotation: `config.LOG_MAX_BYTES` per file, `config.LOG_BACKUP_COUNT` backups
+- Caching: Loggers are cached by `component:session_id` key
+
+**Example:**
+```python
+from common.logger import get_logger
+
+# Component-level logger
+logger = get_logger('server')
+logger.info('Server starting')
+
+# Session-specific logger
+logger = get_logger('agent', session_id='abc123')
+logger.info('Task completed', task_id='task-456', duration_ms=142)
+```
+
+---
+
+### update_session()
+
+Create a new logger for the same component with an updated session ID.
+
+```python
+update_session(logger: logging.Logger, session_id: str) -> logging.Logger
+```
+
+<ParamField path="logger" type="logging.Logger" required>
+  Existing logger instance
+</ParamField>
+
+<ParamField path="session_id" type="str" required>
+  New session identifier
+</ParamField>
+
+<ResponseField name="return" type="logging.Logger">
+  New logger instance for the same component with updated session ID
+</ResponseField>
+
+**Use Case:**
+- Agent receives session ID after check-in
+- Update logger to include session ID in all subsequent logs
+
+**Example:**
+```python
+from common.logger import get_logger, update_session
+
+# Initial logger without session
+logger = get_logger('agent')
+logger.info('Checking in to server')
+
+# Update after receiving session ID
+session_id = checkin_response['session_id']
+logger = update_session(logger, session_id)
+logger.info('Session established')  # Now includes session_id
+```
+
+## Log Format
+
+Each log entry is a JSON object with the following structure:
+
+```json
+{
+  "timestamp": "2026-03-11T15:42:30.123456+07:00",
+  "level": "INFO",
+  "component": "agent",
+  "session_id": "abc123",
+  "message": "Task completed",
+  "task_id": "task-456",
+  "duration_ms": 142
+}
+```
+
+### Standard Fields
+
+<ParamField path="timestamp" type="str">
+  ISO 8601 timestamp in UTC+7 timezone with microsecond precision
+</ParamField>
+
+<ParamField path="level" type="str">
+  Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`
+</ParamField>
+
+<ParamField path="component" type="str">
+  Component name specified in `get_logger()`
+</ParamField>
+
+<ParamField path="session_id" type="str">
+  Session identifier if provided, otherwise `null`
+</ParamField>
+
+<ParamField path="message" type="str">
+  Log message text
+</ParamField>
+
+### Extra Fields
+
+Any additional fields passed via the `extra` kwarg are automatically included:
+
+```python
+logger.info(
+    'Task completed',
+    extra={
+        'task_id': 'task-456',
+        'duration_ms': 142,
+        'exit_code': 0
+    }
+)
+```
+
+### Exception Logging
+
+When logging exceptions, traceback is automatically included:
+
+```python
+try:
+    risky_operation()
+except Exception as e:
+    logger.error('Operation failed', exc_info=True)
+```
+
+Output:
+```json
+{
+  "timestamp": "2026-03-11T15:42:30.123456+07:00",
+  "level": "ERROR",
+  "component": "agent",
+  "message": "Operation failed",
+  "exception": "Traceback (most recent call last):\n  File ..."
+}
+```
+
+## Configuration
+
+Logger behavior is controlled by `common/config.py`:
+
+```python
+LOG_LEVEL        = 'INFO'              # Minimum log level
+LOG_DIR          = 'logs'              # Log directory
+LOG_MAX_BYTES    = 5 * 1024 * 1024     # 5 MB per file
+LOG_BACKUP_COUNT = 3                    # Keep 3 rotated files
+```
+
+### Log Levels
+
+| Level | Use Case |
+|-------|----------|
+| `DEBUG` | Detailed diagnostic information for development |
+| `INFO` | General informational messages about normal operation |
+| `WARNING` | Warning messages for potentially problematic situations |
+| `ERROR` | Error messages for serious problems |
+| `CRITICAL` | Critical messages for very serious errors |
+
+## File Organization
+
+Logs are organized by component:
+
+```
+logs/
+├── agent.log         # Current agent logs
+├── agent.log.1       # Previous rotation
+├── agent.log.2       # Older rotation
+├── server.log        # Current server logs
+├── server.log.1
+└── transport.log     # Current transport logs
+```
+
+## Caching Behavior
+
+Loggers are cached internally to prevent duplicate handlers:
+
+- Cache key: `{component}:{session_id}`
+- First call creates logger with handlers
+- Subsequent calls return cached instance
+- Each unique `component:session_id` pair gets its own logger
+
+**Example:**
+```python
+logger1 = get_logger('agent', 'session1')  # Creates new logger
+logger2 = get_logger('agent', 'session1')  # Returns cached logger
+assert logger1 is logger2  # True
+
+logger3 = get_logger('agent', 'session2')  # Creates different logger
+assert logger1 is logger3  # False
+```
+
+## Usage Examples
+
+### Basic Logging
+
+```python
+from common.logger import get_logger
+
+logger = get_logger('server')
+
+logger.debug('Debug message')
+logger.info('Server started on port 8443')
+logger.warning('High memory usage detected')
+logger.error('Failed to connect to database')
+logger.critical('System shutdown imminent')
+```
+
+### Session-Based Logging
+
+```python
+from common.logger import get_logger, update_session
+
+# Start without session
+logger = get_logger('agent')
+logger.info('Agent starting')
+
+# Update after check-in
+session_id = perform_checkin()
+logger = update_session(logger, session_id)
+logger.info('Session established', session_id=session_id)
+
+# All subsequent logs include session_id
+logger.info('Polling for tasks')
+```
+
+### Structured Logging with Extra Fields
+
+```python
+logger = get_logger('agent', session_id='abc123')
+
+logger.info(
+    'Task executed',
+    extra={
+        'task_id': 'task-789',
+        'command': 'whoami',
+        'exit_code': 0,
+        'duration_ms': 142,
+        'stdout_len': 15,
+        'stderr_len': 0
+    }
+)
+```
+
+### Error Handling
+
+```python
+logger = get_logger('transport')
+
+try:
+    send_message(envelope)
+except ConnectionError as e:
+    logger.error(
+        'Failed to send message',
+        exc_info=True,
+        extra={'host': config.SERVER_HOST, 'port': config.SERVER_PORT}
+    )
+```
+
+## Implementation Details
+
+### Timezone
+
+Logs use UTC+7 timezone:
+
+```python
+_TZ_UTC7 = timezone(timedelta(hours=7))
+timestamp = datetime.now(_TZ_UTC7).isoformat()
+```
+
+### Reserved Keys
+
+The following keys are reserved and excluded from extra fields:
+
+```python
+_RESERVED_KEYS = {
+    'name', 'msg', 'args', 'levelname', 'levelno', 'pathname',
+    'filename', 'module', 'exc_info', 'exc_text', 'stack_info',
+    'lineno', 'funcName', 'created', 'msecs', 'relativeCreated',
+    'thread', 'threadName', 'processName', 'process', 'message',
+    'taskName',
+}
+```
+
+### Formatter Implementation
+
+```python
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
+            'timestamp':  datetime.now(_TZ_UTC7).isoformat(),
+            'level':      record.levelname,
+            'component':  self._component,
+            'session_id': self._session_id,
+            'message':    record.getMessage(),
+        }
+        
+        # Add extra fields
+        for key, value in record.__dict__.items():
+            if key not in _RESERVED_KEYS:
+                entry[key] = value
+        
+        # Add exception info
+        if record.exc_info:
+            entry['exception'] = self.formatException(record.exc_info)
+        
+        return json.dumps(entry)
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Structured Logging">
+    Always pass structured data as `extra` fields instead of string formatting:
+    
+    ```python
+    # Good
+    logger.info('Task completed', extra={'task_id': task_id, 'duration_ms': duration})
+    
+    # Bad
+    logger.info(f'Task {task_id} completed in {duration}ms')
+    ```
+  </Accordion>
+  
+  <Accordion title="Include Session IDs">
+    Always use session-aware loggers for agent operations:
+    
+    ```python
+    logger = get_logger('agent', session_id=session_id)
+    ```
+  </Accordion>
+  
+  <Accordion title="Log Exceptions Properly">
+    Use `exc_info=True` to include tracebacks:
+    
+    ```python
+    try:
+        operation()
+    except Exception as e:
+        logger.error('Operation failed', exc_info=True)
+    ```
+  </Accordion>
+  
+  <Accordion title="Choose Appropriate Log Levels">
+    - `DEBUG`: Detailed info for troubleshooting
+    - `INFO`: Normal operations and state changes
+    - `WARNING`: Degraded operation or potential issues
+    - `ERROR`: Operation failures that need attention
+    - `CRITICAL`: System-level failures
+  </Accordion>
+</AccordionGroup>
+
+## Dependencies
+
+```python
+import json
+import logging
+import logging.handlers
+import os
+from datetime import datetime, timezone, timedelta
+
+from common import config
+```
+
+## See Also
+
+- [Configuration](/api/common/config) - Logging configuration variables
+- [Common Utilities](/api/common/utils) - Error classes logged by this module

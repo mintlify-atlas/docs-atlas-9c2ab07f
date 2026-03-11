@@ -1,0 +1,154 @@
+---
+title: 'agent_main'
+description: 'Agent main module entry point'
+icon: 'play'
+---
+
+## Overview
+
+The `agent_main.py` module serves as the primary entry point for the C2 agent. It orchestrates environment validation and beacon loop initialization with comprehensive error handling.
+
+## Module Location
+
+```
+agent/agent_main.py
+```
+
+## Main Entry Point
+
+The module runs as a standalone script and coordinates agent startup.
+
+### Execution Flow
+
+```python
+if __name__ == '__main__':
+    try:
+        check_lab_environment()
+        BeaconLoop().run()
+    except SystemExit:
+        # check_lab_environment and TERMINATE signal both call sys.exit() — let them through
+        raise
+    except Exception as e:
+        logger.error('catastrophic failure — agent exiting', extra={
+            'reason':    str(e),
+            'traceback': traceback.format_exc(),
+        })
+        sys.exit(1)
+```
+
+## Startup Sequence
+
+### 1. Environment Validation
+
+The agent first validates the lab environment:
+
+```python
+check_lab_environment()
+```
+
+This function performs critical safety checks:
+- Verifies `LAB_MODE` environment variable is set to `1`
+- Confirms server host is in `ALLOWED_HOSTS`
+- Detects debuggers (Windows only)
+- Identifies VM indicators
+
+If any critical check fails, the agent exits with code `1`.
+
+### 2. Beacon Loop Initialization
+
+After validation, the beacon loop starts:
+
+```python
+BeaconLoop().run()
+```
+
+See [BeaconLoop](/api/agent/beacon) for detailed beacon logic.
+
+## Error Handling
+
+### SystemExit Passthrough
+
+The entry point allows `SystemExit` exceptions to propagate:
+
+```python
+except SystemExit:
+    raise
+```
+
+This ensures:
+- Environment check failures exit cleanly
+- `MSG_TERMINATE` signals shutdown the agent correctly
+
+### Catastrophic Failure Recovery
+
+Unexpected exceptions are logged and result in exit code `1`:
+
+```python
+except Exception as e:
+    logger.error('catastrophic failure — agent exiting', extra={
+        'reason':    str(e),
+        'traceback': traceback.format_exc(),
+    })
+    sys.exit(1)
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|----------|
+| `0` | Normal shutdown via `MSG_TERMINATE` |
+| `1` | Environment check failure or catastrophic error |
+
+## Dependencies
+
+```python
+from common.logger import get_logger
+from agent.environment_checks import check_lab_environment
+from agent.beacon import BeaconLoop
+```
+
+## Usage Example
+
+Run the agent from the command line:
+
+```bash
+export LAB_MODE=1
+python agent/agent_main.py
+```
+
+Expected output:
+
+```
+INFO: environment check
+INFO: agent starting
+INFO: checkin complete
+INFO: sleeping before beacon
+```
+
+## Logging
+
+All logs use the `agent` logger namespace:
+
+```python
+logger = get_logger('agent')
+```
+
+Catastrophic failures include:
+- Exception reason
+- Full stack trace
+
+## Security Considerations
+
+<Warning>
+The agent **MUST** pass environment validation before starting. This prevents accidental execution outside the lab environment.
+</Warning>
+
+1. **Lab Mode Required**: Agent refuses to run without `LAB_MODE=1`
+2. **Host Allowlist**: Only connects to pre-approved C2 servers
+3. **Clean Exit**: Ensures all shutdown signals are handled correctly
+
+## Related APIs
+
+- [environment_checks](/api/agent/environment-checks) - Environment validation logic
+- [BeaconLoop](/api/agent/beacon) - Beacon loop implementation
+- [Logger](/api/common/logger) - Logging utilities

@@ -1,0 +1,448 @@
+---
+title: 'Experiments'
+description: 'Running automated experiments for beacon variation analysis'
+---
+
+## Overview
+
+The experiments module provides automated pipelines for capturing, parsing, and analyzing beacon traffic across multiple evasion profiles. It orchestrates the full telemetry stack to generate comparative datasets for C2 detection research.
+
+**Source**: `experiments/`
+
+## Available Experiments
+
+### 1. Beacon Variation Tests
+
+**Purpose**: Capture beacon traffic for all evasion profiles (baseline, low, medium, high) and extract comparative features.
+
+**Script**: `experiments/beacon_variation_tests.py`
+
+**What It Does**:
+1. For each profile:
+   - Set active profile in `evasion/profile_config.yaml`
+   - Start PCAP capture on specified interface
+   - Run agent for 3 minutes (generates ~18 beacons at 10s interval)
+   - Stop capture
+   - Parse PCAP → flows
+   - Extract features → CSV and JSON
+2. Generate summary table comparing profiles
+3. Restore active profile to `medium`
+
+**Usage**:
+
+```bash
+# Run with default interface (enp0s8)
+python -m experiments.beacon_variation_tests
+
+# Specify custom interface
+python -m experiments.beacon_variation_tests --interface eth0
+```
+
+**Output**:
+
+```
+Starting profile run: baseline
+  Capturing for 180s on enp0s8 → pcaps/baseline.pcap
+  Agent started (pid 12345)
+  Agent stopped
+  Parsed 18 flows → pcaps/baseline.flows
+  Extracted 18 feature vectors → pcaps/baseline.features.csv
+  
+[Repeats for low, medium, high profiles]
+
+profile      mean_iat      std_iat       mean_payload  entropy    
+----------------------------------------------------------------------
+baseline     0.2500        0.0123        856.4500      1.2340     
+low          0.2543        0.0287        1024.3200     1.4521     
+medium       0.2612        0.0451        1156.7800     1.6789     
+high         0.2701        0.0623        1289.5400     1.8923
+```
+
+**Files Created**:
+```
+pcaps/
+├── baseline.pcap
+├── baseline.flows
+├── baseline.features.csv
+├── baseline.features.json
+├── low.pcap
+├── low.flows
+├── low.features.csv
+├── low.features.json
+├── medium.pcap
+├── medium.flows
+├── medium.features.csv
+├── medium.features.json
+├── high.pcap
+├── high.flows
+├── high.features.csv
+└── high.features.json
+```
+
+### 2. Entropy Analysis
+
+**Purpose**: Load captured features and generate detailed statistical comparison with interpretations.
+
+**Script**: `experiments/entropy_analysis.py`
+
+**What It Does**:
+1. Load `.features.csv` and `.flows` files for each profile from `pcaps/`
+2. Compute mean and standard deviation for:
+   - Beacon IAT (from `.flows` beacon_iats field)
+   - Shannon entropy (from `.features.csv`)
+   - Payload length (from `.features.csv`)
+3. Generate comparison table
+4. Write Markdown results summary to `experiments/results_summary.md`
+
+**Usage**:
+
+```bash
+# Run after beacon_variation_tests.py has completed
+python -m experiments.entropy_analysis
+```
+
+**Output**:
+
+```
+profile            beacon_iat_mean   beacon_iat_std    entropy_mean      entropy_std       payload_mean      payload_std      
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+baseline           10.0245           0.1234            1.2340            0.0567            856.4500          12.3400          
+low                10.0312           0.2891            1.4521            0.0789            1024.3200         23.4500          
+medium             10.0189           0.4567            1.6789            0.0912            1156.7800         34.5600          
+high               10.0423           0.6234            1.8923            0.1045            1289.5400         45.6700          
+
+Results saved to experiments/results_summary.md
+```
+
+**Generated Report** (`experiments/results_summary.md`):
+
+```markdown
+# Beacon Variation Experiment — Results Summary
+
+> **Metric note**: `beacon_iat` measures time between consecutive TCP connection
+> start times to the same destination — true beacon interval timing.
+> `shannon_entropy` and `payload_len_mean` are per-flow averages.
+
+## Feature Statistics by Profile
+
+| Profile | beacon_iat mean | beacon_iat std | entropy mean | entropy std | payload mean | payload std |
+|---------|----------------|---------------|-------------|------------|-------------|------------|
+| baseline | 10.0245 | 0.1234 | 1.2340 | 0.0567 | 856.4500 | 12.3400 |
+| low | 10.0312 | 0.2891 | 1.4521 | 0.0789 | 1024.3200 | 23.4500 |
+| medium | 10.0189 | 0.4567 | 1.6789 | 0.0912 | 1156.7800 | 34.5600 |
+| high | 10.0423 | 0.6234 | 1.8923 | 0.1045 | 1289.5400 | 45.6700 |
+
+## Interpretations
+
+**Baseline**: Baseline shows beacon IAT std of 0.123s (mean interval 10.0s) with no jitter configured — any variance reflects OS scheduling noise. Payload mean is 856.5 bytes, entropy 1.2340.
+
+**Low**: Low profile beacon IAT std is 2.3x baseline std_iat (0.289s), mean interval 10.0s. Mild padding raises payload to 1024.3 bytes; entropy 1.4521.
+
+**Medium**: Medium profile beacon IAT std is 3.7x baseline std_iat (0.457s), mean interval 10.0s. Increased padding yields 1156.8 bytes mean payload; entropy 1.6789.
+
+**High**: High profile beacon IAT std is 5.1x baseline std_iat (0.623s) via Gaussian jitter — the largest variance across all profiles. Maximum padding raises payload to 1289.5 bytes; entropy 1.8923.
+```
+
+## Experiment Configuration
+
+**Constants** (`experiments/beacon_variation_tests.py:18-22`):
+
+```python
+PROFILES          = ['baseline', 'low', 'medium', 'high']
+AGENT_DURATION_S  = 180                                        # 3 minutes
+PROFILE_CONFIG    = os.path.join('evasion', 'profile_config.yaml')
+INTERFACE         = 'enp0s8'                                   # Ubuntu host-only adapter
+SUMMARY_COLUMNS   = ('profile', 'mean_iat', 'std_iat', 'mean_payload', 'entropy')
+```
+
+**Modify Duration**:
+
+```python
+# Capture for 5 minutes instead of 3
+AGENT_DURATION_S = 300
+```
+
+**Add Custom Profiles**:
+
+```python
+# Test additional profile
+PROFILES = ['baseline', 'low', 'medium', 'high', 'custom']
+```
+
+## Prerequisites
+
+**Infrastructure**:
+- Both VMs running (agent VM + server VM)
+- Docker Compose backend services running
+- Agent configured and reachable at `SERVER_PORT`
+
+**Permissions**:
+- Root/sudo access for tcpdump (or setcap on tcpdump binary)
+- Write access to `pcaps/` directory
+
+**Dependencies**:
+- Python packages: scapy, pyyaml
+- System tools: tcpdump
+
+**Network Setup**:
+- Host-only network configured (default: `enp0s8` on Ubuntu VM)
+- No firewall blocking traffic between VMs
+
+## Pipeline Architecture
+
+Experiment flow for a single profile:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. set_active_profile('medium')                            │
+│    └─ Update evasion/profile_config.yaml                   │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 2. traffic_capture.start_capture()                         │
+│    └─ tcpdump -i enp0s8 -w pcaps/medium.pcap tcp port 443  │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 3. run_agent(180)                                          │
+│    └─ LAB_MODE=1 python -m agent.agent_main               │
+│       (runs for 3 minutes, generates ~18 beacons)          │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 4. traffic_capture.stop_capture()                          │
+│    └─ SIGTERM tcpdump process                              │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 5. flow_parser.parse_pcap('pcaps/medium.pcap')            │
+│    └─ Extract FlowRecords with beacon_iats                 │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 6. flow_parser.save_flows(flows, 'pcaps/medium.flows')   │
+│    └─ Write JSON Lines file                                │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 7. feature_extractor.extract_all('pcaps/medium.flows')   │
+│    └─ Compute all 20 features per flow                     │
+└─────────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 8. feature_extractor.save_features(...)                   │
+│    └─ Write pcaps/medium.features.csv and .json           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Implementation Details
+
+### Profile Switching
+
+The `set_active_profile()` function uses regex to update `profile_config.yaml` in-place:
+
+```python
+def set_active_profile(profile_name: str) -> None:
+    with open(PROFILE_CONFIG, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Replace only the active_profile line, preserve comments
+    updated = re.sub(
+        r'^(active_profile:\s*).*$',
+        rf'\g<1>{profile_name}',
+        content,
+        flags=re.MULTILINE,
+    )
+    
+    with open(PROFILE_CONFIG, 'w', encoding='utf-8') as f:
+        f.write(updated)
+```
+
+**Source**: `experiments/beacon_variation_tests.py:25-43`
+
+### Agent Execution
+
+The agent runs in `LAB_MODE=1` environment for experiment scenarios:
+
+```python
+def run_agent(duration_s: int) -> None:
+    env = {**os.environ, 'LAB_MODE': '1'}
+    proc = subprocess.Popen(
+        [sys.executable, '-m', 'agent.agent_main'],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(duration_s)
+    proc.terminate()
+    proc.wait(timeout=10)
+```
+
+**Source**: `experiments/beacon_variation_tests.py:46-64`
+
+## Custom Experiments
+
+Create your own experiment by importing the telemetry modules:
+
+```python
+import time
+import os
+from telemetry import traffic_capture, flow_parser, feature_extractor
+
+# Custom experiment: test aggressive jitter settings
+def test_aggressive_jitter():
+    # Manually configure profile with extreme settings
+    # (or modify profile_config.yaml programmatically)
+    
+    # Start capture
+    capture_proc = traffic_capture.start_capture(
+        interface='enp0s8',
+        output_file='aggressive_jitter.pcap',
+        bpf_filter='tcp port 443'
+    )
+    
+    # Run traffic generation
+    # ... your traffic generation code ...
+    time.sleep(120)
+    
+    # Stop and process
+    traffic_capture.stop_capture(capture_proc)
+    
+    pcap_path = 'pcaps/aggressive_jitter.pcap'
+    flows = flow_parser.parse_pcap(pcap_path)
+    flow_parser.save_flows(flows, pcap_path.replace('.pcap', '.flows'))
+    
+    features = feature_extractor.extract_all(pcap_path.replace('.pcap', '.flows'))
+    feature_extractor.save_features(features, pcap_path.replace('.pcap', '.features.csv'))
+    
+    print(f'Captured {len(flows)} flows, extracted {len(features)} feature vectors')
+
+if __name__ == '__main__':
+    test_aggressive_jitter()
+```
+
+## Troubleshooting
+
+**tcpdump permission denied**:
+```bash
+# Option 1: Run with sudo
+sudo python -m experiments.beacon_variation_tests
+
+# Option 2: Grant capabilities to tcpdump
+sudo setcap cap_net_raw,cap_net_admin=eip $(which tcpdump)
+```
+
+**No flows parsed**:
+- Check if agent successfully connected to server
+- Verify BPF filter matches actual traffic (check `SERVER_PORT` in config)
+- Inspect PCAP manually: `tcpdump -r pcaps/baseline.pcap -c 10`
+
+**Interface not found**:
+```bash
+# List available interfaces
+ip link show
+
+# Use correct interface name
+python -m experiments.beacon_variation_tests --interface eth0
+```
+
+**Agent fails to start**:
+- Ensure backend services are running: `docker-compose ps`
+- Check agent can reach server: `nc -zv <server_ip> <server_port>`
+- Review agent logs for connection errors
+
+**Profile config not found**:
+```bash
+# Ensure you're running from project root
+cd /path/to/c2-framework
+python -m experiments.beacon_variation_tests
+```
+
+## Experiment Best Practices
+
+**Baseline Capture**:
+- Always run baseline profile first to establish ground truth
+- Capture for at least 3 minutes (18+ beacons at 10s interval)
+- Verify no other network activity during capture
+
+**Comparative Analysis**:
+- Use identical capture duration for all profiles
+- Run experiments back-to-back to minimize environmental variance
+- Capture during low network activity periods
+
+**Data Quality**:
+- Check for packet loss: `tcpdump -r capture.pcap | wc -l`
+- Verify beacon count matches expected (duration / interval)
+- Inspect first/last packet timestamps for timing drift
+
+## Logging
+
+Experiment operations are logged:
+
+```python
+from common.logger import get_logger
+logger = get_logger('beacon_variation_tests')
+```
+
+**Log Events**:
+- `starting profile run`: Logged at start of each profile
+- `active profile set`: Logged after updating profile_config.yaml
+- `agent started`: Logged with PID and duration
+- `agent stopped`: Logged after termination
+- `profile run complete`: Logged with flow/feature counts
+- `profile run failed`: Error if any step fails
+- `active profile restored to medium`: Logged after experiment cleanup
+
+## Performance Considerations
+
+**Total Runtime**:
+- 4 profiles × 3 minutes = 12 minutes capture time
+- Add ~30 seconds parsing/extraction per profile
+- Total experiment time ≈ 15 minutes
+
+**Disk Space**:
+- Typical PCAP: 100-500 KB per profile (compressed traffic)
+- `.flows` files: 10-50 KB
+- `.features.csv`: 5-20 KB
+- Total per experiment: ~2-3 MB
+
+## Next Steps
+
+**Analyze Results**:
+1. Review `experiments/results_summary.md`
+2. Load CSVs into Jupyter notebook for visualization
+3. Compare feature distributions across profiles
+
+**Train Models**:
+```python
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+
+# Load all profiles
+baseline = pd.read_csv('pcaps/baseline.features.csv')
+baseline['label'] = 0
+
+evasion = pd.read_csv('pcaps/high.features.csv')
+evasion['label'] = 1
+
+df = pd.concat([baseline, evasion])
+
+# Train classifier
+feature_cols = ['mean_iat', 'std_iat', 'burstiness', 'shannon_entropy']
+X = df[feature_cols].values
+y = df['label'].values
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3)
+clf = RandomForestClassifier(n_estimators=100)
+clf.fit(X_train, y_train)
+
+print(f'Accuracy: {clf.score(X_test, y_test):.2%}')
+```
+
+## See Also
+
+- [Traffic Capture](/telemetry/traffic-capture) - PCAP capture module
+- [Flow Analysis](/telemetry/flow-analysis) - Flow parsing module
+- [Feature Extraction](/telemetry/feature-extraction) - Feature computation module
+- [Evasion Profiles](/evasion/profiles) - Configuring evasion settings

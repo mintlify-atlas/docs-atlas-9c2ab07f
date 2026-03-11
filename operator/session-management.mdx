@@ -1,0 +1,334 @@
+---
+title: Session Management
+description: Managing agent sessions and understanding session lifecycle
+---
+
+Sessions represent active agent connections to the C2 server. Each session corresponds to a single agent instance running on a compromised system.
+
+## Session Lifecycle
+
+### 1. Session Creation
+
+When an agent checks in for the first time, the server creates a new session:
+
+```python
+session_id = await session_mgr.create_session(
+    payload={
+        'hostname':   'VICTIM-PC',
+        'username':   'jdoe',
+        'os':         'Windows 10 22H2',
+        'agent_ver':  '1.0.0',
+        'jitter_pct': 20,
+    },
+    db=db
+)
+```
+
+The server generates a unique UUID for the session and stores it in both memory and the database.
+
+### 2. Active State
+
+Active sessions:
+- Beacon to the server at regular intervals
+- Check for pending tasks on each beacon
+- Submit task results back to the server
+- Update their `last_seen` timestamp
+
+### 3. Session Deactivation
+
+Sessions can be deactivated by the operator using the `kill` command:
+
+```
+c2> kill a1b2c3d4-e5f6-7890-abcd-ef1234567890
+  Session a1b2c3d4-e5f6-7890-abcd-ef1234567890 deactivated.
+```
+
+Deactivated sessions:
+- Are marked as `active = False` in the database
+- No longer receive new tasks
+- Will not be restored on server restart
+- Remain in the database for forensic analysis
+
+## Viewing Sessions
+
+List all sessions with the `list` command:
+
+```
+c2> list
+
+----------------------------------------------------------------------------------------------------
+SESSION ID                            HOSTNAME          USERNAME          OS                        JITTER    ACTIVE
+----------------------------------------------------------------------------------------------------
+a1b2c3d4-e5f6-7890-abcd-ef1234567890  VICTIM-PC         jdoe              Windows 10 22H2           20%       YES
+b2c3d4e5-f6a7-8901-bcde-f12345678901  UBUNTU-SRV        root              Linux 5.15.0-78-generic   20%       YES
+c3d4e5f6-a7b8-9012-cdef-123456789012  WEB-SERVER        www-data          Linux 6.1.0-13-amd64      20%       NO
+----------------------------------------------------------------------------------------------------
+  3 session(s) total.
+```
+
+### Session Attributes
+
+| Attribute | Description | Example |
+|-----------|-------------|--------|
+| **session_id** | Unique UUID identifier | `a1b2c3d4-e5f6-7890-abcd-ef1234567890` |
+| **hostname** | Computer name | `VICTIM-PC` |
+| **username** | User running agent | `jdoe` |
+| **os** | Operating system | `Windows 10 22H2` |
+| **agent_ver** | Agent version | `1.0.0` |
+| **jitter_pct** | Beacon jitter (0-100%) | `20` |
+| **first_seen** | Initial check-in timestamp | `1710172800.123` |
+| **last_seen** | Most recent beacon | `1710173100.456` |
+| **active** | Active status | `True` or `False` |
+
+## Session Identification
+
+Always use the full session UUID when issuing commands:
+
+```bash
+# Correct
+c2> task a1b2c3d4-e5f6-7890-abcd-ef1234567890 whoami
+
+# Wrong - session ID truncation is not supported
+c2> task a1b2c3d4 whoami
+  ERROR: session a1b2c3d4 not found.
+```
+
+**Tip**: Copy the session ID from the `list` output to avoid typing errors.
+
+## Session Sorting
+
+Sessions are sorted by `last_seen` in descending order (most recent first):
+
+```python
+sorted(sessions, key=lambda s: s.last_seen, reverse=True)
+```
+
+This ensures the most active sessions appear at the top of the list.
+
+## Session Persistence
+
+### Database Storage
+
+All sessions are persisted to SQLite in the `sessions` table:
+
+```sql
+CREATE TABLE sessions (
+    session_id  TEXT PRIMARY KEY,
+    hostname    TEXT,
+    username    TEXT,
+    os          TEXT,
+    agent_ver   TEXT,
+    first_seen  REAL,
+    last_seen   REAL,
+    jitter_pct  INTEGER,
+    active      INTEGER
+);
+```
+
+### Server Restart
+
+When the server restarts, active sessions are automatically restored:
+
+```python
+await session_mgr.restore_from_db(db)
+```
+
+Only sessions with `active = True` are restored to memory. Inactive sessions remain in the database but are not loaded.
+
+## SessionManager Implementation
+
+The `SessionManager` class (in `server/session_manager.py`) provides:
+
+### Core Methods
+
+#### create_session
+
+Creates a new session and persists it:
+
+```python
+session_id = await session_mgr.create_session(payload, db)
+```
+
+Implementation: `server/session_manager.py:34`
+
+#### get_session
+
+Retrieves a session by ID:
+
+```python
+session = await session_mgr.get_session(session_id)
+if not session:
+    print('Session not found')
+```
+
+Returns `None` if the session doesn't exist.
+
+Implementation: `server/session_manager.py:67`
+
+#### update_last_seen
+
+Updates the session's last beacon timestamp:
+
+```python
+await session_mgr.update_last_seen(session_id, db)
+```
+
+This is called automatically on every agent beacon.
+
+Implementation: `server/session_manager.py:72`
+
+#### list_sessions
+
+Returns all sessions sorted by recency:
+
+```python
+sessions = await session_mgr.list_sessions()
+for session in sessions:
+    print(f"{session.hostname} - {session.username}")
+```
+
+Implementation: `server/session_manager.py:81`
+
+#### deactivate_session
+
+Marks a session as inactive:
+
+```python
+await session_mgr.deactivate_session(session_id, db)
+```
+
+This is triggered by the `kill` command.
+
+Implementation: `server/session_manager.py:88`
+
+#### restore_from_db
+
+Reloads active sessions on server startup:
+
+```python
+await session_mgr.restore_from_db(db)
+```
+
+Implementation: `server/session_manager.py:98`
+
+## In-Memory Session State
+
+The `SessionManager` maintains an in-memory dictionary of all active sessions:
+
+```python
+self._sessions: dict[str, SessionState] = {}
+```
+
+This provides O(1) lookups for session operations without hitting the database on every request.
+
+## Session Data Class
+
+Sessions are represented by the `SessionState` dataclass:
+
+```python
+@dataclass
+class SessionState:
+    session_id: str
+    hostname:   str
+    username:   str
+    os:         str
+    agent_ver:  str
+    first_seen: float  # Unix timestamp
+    last_seen:  float  # Unix timestamp
+    jitter_pct: int    # 0-100
+    active:     bool = True
+```
+
+Implementation: `server/session_manager.py:13`
+
+## Concurrency Safety
+
+All session operations are protected by an asyncio lock:
+
+```python
+self._lock = asyncio.Lock()
+
+async with self._lock:
+    self._sessions[session_id] = state
+```
+
+This ensures thread-safe access in the asynchronous server environment.
+
+## Session Management Best Practices
+
+### 1. Monitor Last Seen Times
+
+Check the `last_seen` timestamp to identify stale sessions:
+
+```python
+import time
+
+for session in sessions:
+    elapsed = time.time() - session.last_seen
+    if elapsed > 300:  # 5 minutes
+        print(f"Warning: {session.hostname} hasn't beaconed in {elapsed}s")
+```
+
+### 2. Clean Up Inactive Sessions
+
+Regularly deactivate sessions that are no longer needed:
+
+```
+c2> kill <old-session-id>
+```
+
+### 3. Track Session Metadata
+
+Use hostname, username, and OS information to organize your sessions:
+
+```
+VICTIM-PC (jdoe) - Windows 10 → Development workstation
+UBUNTU-SRV (root) - Linux → Production server
+WEB-SERVER (www-data) - Linux → Web application
+```
+
+### 4. Session ID Management
+
+Maintain a separate list of important session IDs for quick reference:
+
+```bash
+# Save to a file
+echo "a1b2c3d4-e5f6-7890-abcd-ef1234567890  # VICTIM-PC - jdoe" >> sessions.txt
+```
+
+## Error Handling
+
+### Session Not Found
+
+```
+c2> task nonexistent-id whoami
+  ERROR: session nonexistent-id not found.
+```
+
+Verify the session ID with the `list` command.
+
+### Inactive Session
+
+```
+c2> task c3d4e5f6-a7b8-9012-cdef-123456789012 whoami
+  ERROR: session c3d4e5f6-a7b8-9012-cdef-123456789012 is inactive.
+```
+
+You cannot execute tasks on deactivated sessions.
+
+## Logging
+
+All session operations are logged with structured data:
+
+```python
+logger.info('session created', extra={
+    'session_id': session_id,
+    'hostname': state.hostname
+})
+
+logger.info('session deactivated', extra={
+    'session_id': session_id
+})
+```
+
+Check logs in the `logs/` directory for session activity.

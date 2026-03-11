@@ -1,0 +1,490 @@
+---
+title: 'Traffic Padding'
+description: 'Payload size obfuscation through random padding'
+---
+
+## Overview
+
+Traffic padding adds random bytes to beacon payloads to obscure actual message sizes and defeat network fingerprinting systems that identify C2 traffic by analyzing consistent payload lengths.
+
+## Why Padding Matters
+
+Network security tools often detect C2 beacons by identifying **fixed payload size patterns**:
+
+<CodeGroup>
+```text Without Padding (Detectable)
+Beacon Payloads:
+  Beacon 1: 247 bytes
+  Beacon 2: 247 bytes  ← Same size
+  Beacon 3: 247 bytes  ← Same size
+  Beacon 4: 247 bytes  ← Same size
+
+⚠️ Consistent sizes create detectable signature
+```
+
+```text With Padding (Evasive)
+Beacon Payloads:
+  Beacon 1: 247 bytes + 42 pad  = 289 bytes
+  Beacon 2: 247 bytes + 91 pad  = 338 bytes
+  Beacon 3: 247 bytes + 15 pad  = 262 bytes
+  Beacon 4: 247 bytes + 68 pad  = 315 bytes
+
+✓ Varied sizes obscure actual message length
+```
+</CodeGroup>
+
+<Info>
+  Padding is applied **per request**. Each beacon generates a new random pad length within the configured min/max range.
+</Info>
+
+## Padding Algorithm
+
+The padding system uses a length-prefix protocol:
+
+```python
+# Source: evasion/padding_strat.py:8-19
+def pad(plaintext: bytes, min_bytes: int, max_bytes: int) -> bytes:
+    # Prepend a 2-byte length prefix and random pad bytes to plaintext.
+    if min_bytes > max_bytes:
+        raise ValueError(
+            f"invalid padding range: min_bytes ({min_bytes}) > max_bytes ({max_bytes})"
+        )
+
+    pad_len   = random.randint(min_bytes, max_bytes) if max_bytes > 0 else 0
+    pad_bytes = os.urandom(pad_len)
+
+    # length prefix lets strip_padding know exactly how many bytes to skip
+    return struct.pack('>H', pad_len) + pad_bytes + plaintext
+```
+
+### Protocol Structure
+
+```
+┌─────────────┬──────────────────┬─────────────────┐
+│   2 bytes   │   N bytes        │   M bytes       │
+│  (uint16)   │  (random pad)    │  (plaintext)    │
+├─────────────┼──────────────────┼─────────────────┤
+│  pad_len=N  │  os.urandom(N)   │  actual message │
+└─────────────┴──────────────────┴─────────────────┘
+      ↑              ↑                   ↑
+   Header        Random Bytes       Original Data
+```
+
+**Key Details**:
+- **Header**: 2-byte big-endian uint16 stores pad length (0-65535)
+- **Padding**: Cryptographically random bytes from `os.urandom()`
+- **Plaintext**: Original beacon message appended after padding
+
+## Stripping Padding
+
+The server-side strips padding using the length prefix:
+
+```python
+# Source: evasion/padding_strat.py:22-40
+def strip_padding(padded: bytes) -> bytes:
+    # Remove the padding prepended by pad() and return the original plaintext.
+    if len(padded) < HEADER_SIZE:
+        raise ValueError(
+            f'strip_padding: input too short to contain length prefix '
+            f'(got {len(padded)} bytes, need at least {HEADER_SIZE})'
+        )
+
+    pad_len = struct.unpack('>H', padded[:HEADER_SIZE])[0]
+
+    expected_min = HEADER_SIZE + pad_len
+    if len(padded) < expected_min:
+        raise ValueError(
+            f'strip_padding: input too short — '
+            f'header claims {pad_len} pad bytes but only '
+            f'{len(padded) - HEADER_SIZE} bytes follow the header'
+        )
+
+    return padded[HEADER_SIZE + pad_len:]
+```
+
+### Strip Process
+
+```python
+# Example: Strip padding from received beacon
+padded_beacon = b'\x00\x2a' + b'\xff' * 42 + b'{"beacon_id":"abc123"}'
+#                 ^^^^^^       ^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^
+#                 pad_len=42   42 random      actual JSON message
+
+plaintext = strip_padding(padded_beacon)
+print(plaintext)  # b'{"beacon_id":"abc123"}'
+```
+
+## Padding Ranges
+
+Traffic profiles define min/max padding bounds:
+
+<Tabs>
+  <Tab title="baseline - No Padding">
+    ```yaml
+    padding_min: 0
+    padding_max: 0
+    ```
+    
+    **Behavior**: Only 2-byte header added, pad_len=0
+    
+    ```python
+    >>> pad(b'hello', 0, 0)
+    b'\x00\x00hello'  # 2-byte zero header + plaintext
+    #  ^^^^^^ pad_len=0
+    ```
+    
+    <Warning>
+      No padding provides no size obfuscation. Use only for testing.
+    </Warning>
+  </Tab>
+  
+  <Tab title="low - Variable Light Padding">
+    ```yaml
+    padding_min: 0
+    padding_max: 64
+    ```
+    
+    **Behavior**: 0-64 random bytes per request
+    
+    ```python
+    >>> pad(b'hello', 0, 64)
+    b'\x00\x1f' + (31 random bytes) + b'hello'  # 31 bytes padding
+    #  ^^^^^^ pad_len=31 (random each call)
+    ```
+  </Tab>
+  
+  <Tab title="medium - Moderate Padding">
+    ```yaml
+    padding_min: 0
+    padding_max: 128
+    ```
+    
+    **Behavior**: 0-128 random bytes per request
+    
+    ```python
+    >>> pad(b'hello', 0, 128)
+    b'\x00\x57' + (87 random bytes) + b'hello'  # 87 bytes padding
+    #  ^^^^^^ pad_len=87
+    ```
+  </Tab>
+  
+  <Tab title="high - Guaranteed Heavy Padding">
+    ```yaml
+    padding_min: 64
+    padding_max: 256
+    ```
+    
+    **Behavior**: Always 64-256 bytes padding
+    
+    ```python
+    >>> pad(b'hello', 64, 256)
+    b'\x00\xb3' + (179 random bytes) + b'hello'  # 179 bytes padding
+    #  ^^^^^^ pad_len=179 (always ≥64)
+    ```
+    
+    <Info>
+      High profile enforces minimum padding to ensure every beacon has significant size variance.
+    </Info>
+  </Tab>
+</Tabs>
+
+## Padding Characteristics
+
+### Cryptographic Randomness
+
+Padding bytes use `os.urandom()` for unpredictable content:
+
+```python
+pad_bytes = os.urandom(pad_len)
+```
+
+**Properties**:
+- No patterns or repetition
+- Passes entropy tests
+- Defeats content-based fingerprinting
+- Suitable for cryptographic applications
+
+### Dynamic Per-Request
+
+Each beacon generates new random padding:
+
+```python
+# Two beacons with same plaintext → different total sizes
+msg = b'{"status": "alive"}'
+
+beacon1 = pad(msg, 32, 128)  # 2 + 67 + 19 = 88 bytes
+beacon2 = pad(msg, 32, 128)  # 2 + 103 + 19 = 124 bytes
+
+assert len(beacon1) != len(beacon2)  # Different sizes
+assert strip_padding(beacon1) == strip_padding(beacon2) == msg  # Same plaintext
+```
+
+## Implementation Details
+
+### Header Size Constant
+
+```python
+HEADER_SIZE = 2  # 2-byte uint16 big-endian length prefix
+```
+
+The 2-byte header limits pad_len to 0-65535 bytes (64 KB max).
+
+### Range Validation
+
+```python
+if min_bytes > max_bytes:
+    raise ValueError(
+        f"invalid padding range: min_bytes ({min_bytes}) > max_bytes ({max_bytes})"
+    )
+```
+
+Configuration errors are caught at pad-time with clear error messages.
+
+### Zero-Padding Behavior
+
+When max_bytes=0, padding is skipped entirely:
+
+```python
+pad_len = random.randint(min_bytes, max_bytes) if max_bytes > 0 else 0
+```
+
+## Usage Examples
+
+<CodeGroup>
+```python Basic Usage
+from evasion.padding_strat import pad, strip_padding
+
+# Client-side: Pad outgoing beacon
+plaintext = b'{"beacon_id": "xyz789", "status": "active"}'
+padded = pad(plaintext, min_bytes=32, max_bytes=128)
+
+# Send padded beacon over network
+send_to_server(padded)
+
+# Server-side: Strip padding
+received = recv_from_client()
+original = strip_padding(received)
+
+print(original)  # b'{"beacon_id": "xyz789", "status": "active"}'
+```
+
+```python Profile Integration
+from transport.traffic_profile import load_active_profile
+from evasion.padding_strat import pad
+
+# Load padding config from profile
+profile = load_active_profile()
+
+def send_beacon(message: bytes):
+    # Apply padding based on active profile
+    padded = pad(
+        message,
+        min_bytes=profile.padding_min,
+        max_bytes=profile.padding_max
+    )
+    
+    print(f"Original: {len(message)} bytes")
+    print(f"Padded: {len(padded)} bytes")
+    print(f"Overhead: {len(padded) - len(message)} bytes")
+    
+    return padded
+```
+
+```python Fixed Padding Length
+# Some scenarios require exact padding amounts
+fixed_pad = pad(message, min_bytes=100, max_bytes=100)
+
+# Result always has exactly 100 pad bytes:
+# 2 (header) + 100 (padding) + len(message)
+```
+
+```python No Padding (Testing)
+# Baseline profile: only header, no padding
+baseline = pad(message, min_bytes=0, max_bytes=0)
+
+# Result: 2-byte zero header + message
+assert len(baseline) == 2 + len(message)
+```
+</CodeGroup>
+
+## Bandwidth Impact
+
+### Overhead Calculation
+
+Padding increases network usage:
+
+| Profile | Min Overhead | Max Overhead | Average Overhead |
+|---------|-------------|--------------|------------------|
+| baseline | 2 bytes | 2 bytes | **2 bytes** |
+| low | 2 bytes | 66 bytes | **34 bytes** |
+| medium | 2 bytes | 130 bytes | **66 bytes** |
+| high | 66 bytes | 258 bytes | **162 bytes** |
+
+<Note>
+  **Average Overhead** = 2 + (padding_min + padding_max) / 2
+</Note>
+
+### Example: 200-byte Beacon
+
+```python
+base_message = 200  # bytes
+
+# Without padding (baseline)
+baseline_total = 2 + 0 + 200 = 202 bytes
+
+# With medium padding (0-128)
+medium_avg = 2 + 64 + 200 = 266 bytes  # +31.7% overhead
+
+# With high padding (64-256)
+high_avg = 2 + 160 + 200 = 362 bytes  # +79.2% overhead
+```
+
+## Error Handling
+
+The implementation includes comprehensive error checking:
+
+<AccordionGroup>
+  <Accordion title="Invalid Padding Range">
+    ```python
+    >>> pad(b'test', min_bytes=100, max_bytes=50)
+    ValueError: invalid padding range: min_bytes (100) > max_bytes (50)
+    ```
+    
+    **Fix**: Ensure min ≤ max in profile configuration
+  </Accordion>
+  
+  <Accordion title="Truncated Header">
+    ```python
+    >>> strip_padding(b'\x00')  # Only 1 byte, need 2
+    ValueError: strip_padding: input too short to contain length prefix
+                (got 1 bytes, need at least 2)
+    ```
+    
+    **Cause**: Network corruption or incomplete transmission
+  </Accordion>
+  
+  <Accordion title="Truncated Padding">
+    ```python
+    >>> bad = struct.pack('>H', 200) + b'\x00' * 10
+    >>> strip_padding(bad)  # Claims 200 pad bytes, only 10 present
+    ValueError: strip_padding: input too short —
+                header claims 200 pad bytes but only 10 bytes follow
+    ```
+    
+    **Cause**: Data corruption or protocol mismatch
+  </Accordion>
+</AccordionGroup>
+
+## Testing Padding
+
+### Round-Trip Validation
+
+```python
+original = b'secret beacon message'
+
+# Pad with various ranges
+for min_b, max_b in [(0, 64), (64, 128), (128, 256)]:
+    padded = pad(original, min_b, max_b)
+    recovered = strip_padding(padded)
+    
+    assert recovered == original, "Round-trip failed!"
+    print(f"✓ Range [{min_b}, {max_b}]: {len(padded)} bytes total")
+```
+
+### Length Verification
+
+```python
+from evasion.padding_strat import HEADER_SIZE
+
+# Verify padded length is within expected range
+for _ in range(100):
+    padded = pad(b'test', 10, 100)
+    
+    min_expected = HEADER_SIZE + 10 + len(b'test')  # 2 + 10 + 4 = 16
+    max_expected = HEADER_SIZE + 100 + len(b'test') # 2 + 100 + 4 = 106
+    
+    assert min_expected <= len(padded) <= max_expected
+```
+
+### Randomness Verification
+
+```python
+# Verify padding is random, not deterministic
+samples = [pad(b'test', 32, 32) for _ in range(10)]
+
+# All should have same length (2 + 32 + 4 = 38)
+assert all(len(s) == 38 for s in samples)
+
+# But different content (random pad bytes)
+assert len(set(samples)) > 1, "Padding should be random!"
+```
+
+## Operational Recommendations
+
+<CardGroup cols={2}>
+  <Card title="Bandwidth Available" icon="signal">
+    Use **medium** or **high** profiles for maximum obfuscation
+    
+    Padding overhead is negligible for most operations
+  </Card>
+  
+  <Card title="Bandwidth Constrained" icon="signal-weak">
+    Use **low** profile for minimal overhead
+    
+    Still provides size variance without heavy bandwidth cost
+  </Card>
+  
+  <Card title="Long-Running Beacons" icon="clock">
+    Use **high** profile with guaranteed minimum padding
+    
+    Prevents statistical analysis over many samples
+  </Card>
+  
+  <Card title="Large Payloads" icon="file">
+    Padding has less relative impact on large messages
+    
+    256 bytes padding on 10KB message = only 2.5% overhead
+  </Card>
+</CardGroup>
+
+<Warning>
+  **Profile Changes**: Changing padding ranges mid-operation may create detectable pattern shifts. Maintain consistent padding configuration throughout an operation.
+</Warning>
+
+## Combining with Other Evasion
+
+Padding works best alongside:
+
+1. **Jitter Strategies**: Obscures both timing AND size patterns
+2. **Header Randomization**: Prevents correlation via User-Agent
+3. **Encryption**: Ensures pad bytes are indistinguishable from ciphertext
+
+```python
+# Full evasion stack
+from transport.traffic_profile import load_active_profile
+
+profile = load_active_profile()
+
+# 1. Encrypt message
+encrypted = encrypt(plaintext)
+
+# 2. Add random padding
+padded = pad(encrypted, profile.padding_min, profile.padding_max)
+
+# 3. Send with randomized headers (handled by transport layer)
+# 4. Sleep with jitter before next beacon
+```
+
+## Related Topics
+
+<CardGroup cols={3}>
+  <Card title="Traffic Profiles" icon="sliders" href="/evasion/traffic-profiles">
+    Configure padding in profile YAML
+  </Card>
+  <Card title="Jitter Strategies" icon="clock" href="/evasion/jitter-strategies">
+    Combine with timing randomization
+  </Card>
+  <Card title="Evasion Overview" icon="shield" href="/evasion/overview">
+    Complete evasion architecture
+  </Card>
+</CardGroup>

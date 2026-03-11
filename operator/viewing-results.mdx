@@ -1,0 +1,508 @@
+---
+title: Viewing Results
+description: Viewing and interpreting task execution results
+---
+
+The `results` command displays output from executed tasks, including stdout, stderr, exit codes, and execution timing.
+
+## Basic Results Usage
+
+View all results for a session:
+
+```
+c2> results a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+----------------------------------------------------------------------------------------------------
+TASK ID                               EXIT      DURATION  STDOUT
+----------------------------------------------------------------------------------------------------
+9f8e7d6c-5b4a-3210-9876-543210abcdef  0         42ms      VICTIM-PC\jdoe
+8e7d6c5b-4a32-1098-7654-3210abcdef12  0         156ms     Pinging 8.8.8.8 with 32 bytes of data: Reply from 8.8.8...
+7d6c5b4a-3210-9876-5432-10abcdef1234  1         87ms      
+----------------------------------------------------------------------------------------------------
+  3 result(s) total.
+
+  Enter a task_id to view full output, or press Enter to skip:
+```
+
+## Results Table Format
+
+The results table shows:
+
+| Column | Description | Format |
+|--------|-------------|--------|
+| **TASK ID** | Unique task identifier | Full UUID (36 characters) |
+| **EXIT** | Command exit code | Integer (0 = success) |
+| **DURATION** | Execution time | Milliseconds with "ms" suffix |
+| **STDOUT** | Command output | First 60 characters (truncated) |
+
+### Truncated Output
+
+Stdout is truncated to **60 characters** in the table view:
+
+```python
+stdout_preview = (r['stdout'] or '').replace('\n', ' ')[:60]
+```
+
+Newlines are replaced with spaces for single-line display.
+
+Implementation: `server/api_interface.py:100`
+
+## Viewing Full Output
+
+After viewing the results table, you can enter a task ID to see the complete output:
+
+```
+  Enter a task_id to view full output, or press Enter to skip: 8e7d6c5b-4a32-1098-7654-3210abcdef12
+
+  Task ID   : 8e7d6c5b-4a32-1098-7654-3210abcdef12
+  Exit code : 0
+  Duration  : 156ms
+  STDOUT:
+Pinging 8.8.8.8 with 32 bytes of data:
+Reply from 8.8.8.8: bytes=32 time=14ms TTL=118
+Reply from 8.8.8.8: bytes=32 time=13ms TTL=118
+Reply from 8.8.8.8: bytes=32 time=14ms TTL=118
+Reply from 8.8.8.8: bytes=32 time=13ms TTL=118
+
+Ping statistics for 8.8.8.8:
+    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 13ms, Maximum = 14ms, Average = 13ms
+```
+
+This shows:
+- Full task ID
+- Exit code
+- Execution duration
+- Complete stdout (with original formatting)
+- Complete stderr (if present)
+
+## Understanding Exit Codes
+
+Exit codes indicate task execution status:
+
+### Success (0)
+
+The command completed without errors:
+
+```
+TASK ID                               EXIT      DURATION  STDOUT
+9f8e7d6c-5b4a-3210-9876-543210abcdef  0         42ms      VICTIM-PC\jdoe
+```
+
+**Note**: Exit code 0 means the command ran successfully, not necessarily that it achieved the desired result.
+
+### Command Errors (1-125)
+
+The command ran but encountered an error:
+
+```
+TASK ID                               EXIT      DURATION  STDOUT
+7d6c5b4a-3210-9876-5432-10abcdef1234  1         87ms      
+
+  Task ID   : 7d6c5b4a-3210-9876-5432-10abcdef1234
+  Exit code : 1
+  Duration  : 87ms
+  STDOUT:
+(empty)
+  STDERR:
+Ping request could not find host invalid-hostname. Please check the name and try again.
+```
+
+Check stderr for error details.
+
+### Blocked Command (126)
+
+The command is on the blocklist:
+
+```
+TASK ID                               EXIT      DURATION  STDOUT
+6c5b4a32-1098-7654-3210-abcdef123456  126       5ms       
+
+  Task ID   : 6c5b4a32-1098-7654-3210-abcdef123456
+  Exit code : 126
+  Duration  : 5ms
+  STDOUT:
+(empty)
+  STDERR:
+BLOCKED: prohibited command
+```
+
+The command was rejected due to security policy.
+
+### Command Not Found (127)
+
+The command doesn't exist on the target system:
+
+```
+TASK ID                               EXIT      DURATION  STDOUT
+5b4a3210-9876-5432-10ab-cdef12345678  127       8ms       
+
+  Task ID   : 5b4a3210-9876-5432-10ab-cdef12345678
+  Exit code : 127
+  Duration  : 8ms
+  STDOUT:
+(empty)
+  STDERR:
+COMMAND NOT FOUND
+```
+
+Verify the command name and availability on the target OS.
+
+### Timeout (124)
+
+The command exceeded the 30-second timeout:
+
+```
+TASK ID                               EXIT      DURATION  STDOUT
+4a321098-7654-3210-abcd-ef1234567890  124       30001ms   
+
+  Task ID   : 4a321098-7654-3210-abcd-ef1234567890
+  Exit code : 124
+  Duration  : 30001ms
+  STDOUT:
+(empty)
+  STDERR:
+TIMEOUT
+```
+
+The command was terminated after 30 seconds.
+
+## Exit Code Summary Table
+
+| Exit Code | Meaning | Action |
+|-----------|---------|--------|
+| **0** | Success | Normal operation |
+| **1-125** | Command error | Check stderr for details |
+| **126** | Blocked command | Review security policy |
+| **127** | Command not found | Verify command exists |
+| **124** | Timeout | Use shorter-running command |
+
+## Result Timing
+
+Duration is measured in **milliseconds** and includes:
+
+- Command execution time
+- Output capture overhead
+- Subprocess management time
+
+```python
+start_ms = time.monotonic()
+# ... execute command ...
+duration_ms = int((time.monotonic() - start_ms) * 1000)
+```
+
+Implementation: `agent/executor.py:36-39`
+
+### Timing Examples
+
+```
+# Fast command (< 100ms)
+whoami                  42ms
+hostname                35ms
+echo hello              12ms
+
+# Medium command (100ms - 1s)
+ping -n 4 8.8.8.8      156ms
+ipconfig /all          234ms
+
+# Slow command (> 1s)
+nslookup example.com   1423ms
+tracert 8.8.8.8        5678ms
+
+# Timeout (30s limit)
+sleep 60               30001ms  # exit 124
+```
+
+## Output Handling
+
+### Stdout
+
+Standard output is captured in the `stdout` field:
+
+```python
+task_result = TaskResult(
+    task_id     = task_id,
+    stdout      = (result.stdout or '')[:MAX_OUTPUT],
+    stderr      = (result.stderr or '')[:MAX_OUTPUT],
+    exit_code   = result.returncode,
+    duration_ms = elapsed,
+)
+```
+
+Implementation: `agent/executor.py:89`
+
+### Stderr
+
+Standard error is captured separately and only displayed in full result view:
+
+```
+  STDOUT:
+(empty)
+  STDERR:
+Ping request could not find host invalid-hostname.
+```
+
+Stderr is shown below stdout in the full output view.
+
+### Empty Output
+
+Commands with no output show `(empty)`:
+
+```
+  STDOUT:
+(empty)
+```
+
+Implementation: `server/api_interface.py:119`
+
+### Output Size Limit
+
+Both stdout and stderr are capped at **64 KB**:
+
+```python
+MAX_OUTPUT = 65536  # 64 KB cap
+```
+
+Output exceeding this limit is silently truncated to prevent memory issues.
+
+Implementation: `agent/executor.py:9`
+
+## Result Persistence
+
+All results are stored in the database when received from the agent:
+
+```python
+await db.insert_result(
+    result_id   = str(uuid.uuid4()),
+    task_id     = task_id,
+    stdout      = result.get('stdout', ''),
+    stderr      = result.get('stderr', ''),
+    exit_code   = result.get('exit_code', -1),
+    duration_ms = result.get('duration_ms', 0),
+)
+```
+
+Implementation: `server/command_queue.py:142`
+
+### Database Schema
+
+Results are stored in the `results` table:
+
+```sql
+CREATE TABLE results (
+    result_id   TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL,
+    stdout      TEXT,
+    stderr      TEXT,
+    exit_code   INTEGER,
+    duration_ms INTEGER,
+    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+);
+```
+
+## Result Retrieval
+
+Results are fetched from the database by session ID:
+
+```python
+results = await db.get_results_for_session(session_id)
+```
+
+This returns all results for tasks executed on that session, ordered by task creation time.
+
+## Results Display Implementation
+
+The results command uses two display functions:
+
+### Table View
+
+```python
+def _print_results(results: list) -> None:
+    if not results:
+        print('  No results for this session.')
+        return
+
+    header = (
+        'TASK ID'.ljust(COL_ID) + '  ' +
+        'EXIT'.ljust(COL_NARROW) + '  ' +
+        'DURATION'.ljust(COL_NARROW) + '  ' +
+        'STDOUT'
+    )
+    print()
+    print(DIVIDER)
+    print(header)
+    print(DIVIDER)
+
+    for r in results:
+        stdout_preview = (r['stdout'] or '').replace('\n', ' ')[:60]
+        row = (
+            r['task_id'].ljust(COL_ID) + '  ' +
+            str(r['exit_code']).ljust(COL_NARROW) + '  ' +
+            f'{r["duration_ms"]}ms'.ljust(COL_NARROW) + '  ' +
+            stdout_preview
+        )
+        print(row)
+
+    print(DIVIDER)
+    print(f'  {len(results)} result(s) total.')
+    print()
+```
+
+Implementation: `server/api_interface.py:81`
+
+### Full Output View
+
+```python
+def _print_full_result(result) -> None:
+    print(f'\n  Task ID   : {result["task_id"]}')
+    print(f'  Exit code : {result["exit_code"]}')
+    print(f'  Duration  : {result["duration_ms"]}ms')
+    print(f'  STDOUT:\n{result["stdout"] or "(empty)"}')
+    if result['stderr']:
+        print(f'  STDERR:\n{result["stderr"]}')
+    print()
+```
+
+Implementation: `server/api_interface.py:114`
+
+## Result Interpretation Examples
+
+### Successful Reconnaissance
+
+```
+c2> task <id> whoami
+c2> results <id>
+
+TASK ID                               EXIT      DURATION  STDOUT
+9f8e7d6c-5b4a-3210-9876-543210abcdef  0         42ms      VICTIM-PC\jdoe
+```
+
+**Analysis**: Command succeeded, user is `jdoe` on `VICTIM-PC`.
+
+### Network Connectivity Test
+
+```
+c2> task <id> ping -n 4 8.8.8.8
+c2> results <id>
+
+TASK ID                               EXIT      DURATION  STDOUT
+8e7d6c5b-4a32-1098-7654-3210abcdef12  0         156ms     Pinging 8.8.8.8 with 32 bytes of data: Reply from 8.8.8...
+```
+
+**Analysis**: Network connectivity confirmed, avg latency ~14ms.
+
+### Failed Command
+
+```
+c2> task <id> ping invalid-hostname
+c2> results <id>
+
+TASK ID                               EXIT      DURATION  STDOUT
+7d6c5b4a-3210-9876-5432-10abcdef1234  1         87ms      
+
+  STDERR:
+Ping request could not find host invalid-hostname.
+```
+
+**Analysis**: DNS resolution failed, hostname doesn't exist.
+
+### Blocked Operation
+
+```
+c2> task <id> nmap 192.168.1.0/24
+c2> results <id>
+
+TASK ID                               EXIT      DURATION  STDOUT
+6c5b4a32-1098-7654-3210-abcdef123456  126       5ms       
+
+  STDERR:
+BLOCKED: prohibited command
+```
+
+**Analysis**: Command blocked by security policy.
+
+## Result Management Best Practices
+
+### 1. Check Results Regularly
+
+Always verify task completion:
+
+```bash
+c2> task <id> <command>
+c2> results <id>
+```
+
+### 2. Investigate Non-Zero Exit Codes
+
+Any exit code other than 0 indicates an issue:
+
+```bash
+# Check stderr for error details
+Enter a task_id to view full output: <task-id>
+```
+
+### 3. Monitor Execution Times
+
+Slow commands may indicate:
+- Network latency
+- System resource constraints
+- Command hanging
+
+### 4. Review Stderr
+
+Always check stderr for warnings and errors, even if exit code is 0.
+
+### 5. Archive Important Results
+
+Copy critical output for documentation:
+
+```bash
+# Use console output redirection (if supported)
+c2> results <id> > session_results.txt
+```
+
+## Error Handling
+
+### Session Not Found
+
+```
+c2> results nonexistent-id
+  ERROR: session nonexistent-id not found.
+```
+
+Verify the session ID with `list`.
+
+### No Results Available
+
+```
+c2> results <id>
+  No results for this session.
+```
+
+Either:
+- No tasks have been executed
+- Tasks are still pending/dispatched
+- Agent hasn't returned results yet
+
+### Invalid Task ID
+
+```
+  Enter a task_id to view full output: invalid-id
+  Task invalid-id not found in results.
+```
+
+Enter a valid task ID from the results table.
+
+## Logging
+
+Result operations are logged:
+
+```python
+logger.info('task complete', extra={
+    'task_id': task_id,
+    'exit_code': result.get('exit_code'),
+})
+```
+
+Check `logs/` for detailed execution history and troubleshooting.

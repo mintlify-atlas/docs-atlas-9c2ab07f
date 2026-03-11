@@ -1,0 +1,557 @@
+---
+title: 'environment_checks'
+description: 'Environment validation API'
+icon: 'shield-check'
+---
+
+## Overview
+
+The `environment_checks.py` module validates the runtime environment before the agent starts. It performs critical safety checks to prevent execution outside the intended lab environment.
+
+## Module Location
+
+```
+agent/environment_checks.py
+```
+
+## Public API
+
+### `check_lab_environment() -> None`
+
+Runs all environment checks. Exits on critical failures, logs warnings for informational checks.
+
+**Checks Performed:**
+
+1. **Lab Mode** (critical) - Exits if `LAB_MODE != '1'`
+2. **Allowed Host** (critical) - Exits if server not in allowlist
+3. **Debugger** (warning) - Logs if debugger detected (Windows only)
+4. **VM Detection** (info) - Logs VM indicators found
+
+**Exit Behavior:**
+
+Calls `sys.exit(1)` if any critical check fails.
+
+**Usage:**
+
+```python
+from agent.environment_checks import check_lab_environment
+
+try:
+    check_lab_environment()
+    # Safe to proceed
+except SystemExit:
+    # Environment validation failed
+    pass
+```
+
+**Logging Output:**
+
+```python
+logger.info('environment check', extra={
+    'lab_mode_set':      os.environ.get(config.LAB_MODE_ENV_VAR) == config.LAB_MODE_REQUIRED,
+    'host_allowed':      config.SERVER_HOST in config.ALLOWED_HOSTS,
+    'debugger_detected': debugger_detected,
+    'vm_detected':       bool(_check_vm()),
+})
+```
+
+## Internal Check Functions
+
+### `_check_lab_mode() -> None`
+
+<Note>
+Internal function - exits immediately if `LAB_MODE` environment variable is not set to `'1'`.
+</Note>
+
+**Configuration:**
+
+```python
+config.LAB_MODE_ENV_VAR   = 'LAB_MODE'
+config.LAB_MODE_REQUIRED  = '1'
+```
+
+**Logic:**
+
+```python
+value = os.environ.get(config.LAB_MODE_ENV_VAR)
+if value != config.LAB_MODE_REQUIRED:
+    logger.error('LAB_MODE invalid — refusing to run outside lab', extra={
+        'check':    'lab_mode',
+        'value':    value,
+        'required': config.LAB_MODE_REQUIRED
+    })
+    sys.exit(1)
+```
+
+**Test Cases:**
+
+```python
+# Pass
+export LAB_MODE=1
+_check_lab_mode()  # Returns normally
+
+# Fail - wrong value
+export LAB_MODE=0
+_check_lab_mode()  # Exits with code 1
+
+# Fail - unset
+unset LAB_MODE
+_check_lab_mode()  # Exits with code 1
+```
+
+---
+
+### `_check_allowed_host() -> None`
+
+<Note>
+Internal function - exits if configured server host is not in `ALLOWED_HOSTS`.
+</Note>
+
+**Configuration:**
+
+```python
+config.SERVER_HOST   = 'c2.lab.internal'
+config.ALLOWED_HOSTS = ['c2.lab.internal', '192.168.100.10', 'localhost']
+```
+
+**Logic:**
+
+```python
+host = config.SERVER_HOST
+if host not in config.ALLOWED_HOSTS:
+    logger.error('SERVER_HOST not permitted', extra={
+        'check':         'allowed_host',
+        'host':          host,
+        'allowed_hosts': config.ALLOWED_HOSTS
+    })
+    sys.exit(1)
+```
+
+**Example:**
+
+```python
+# Pass
+config.SERVER_HOST   = 'c2.lab.internal'
+config.ALLOWED_HOSTS = ['c2.lab.internal']
+_check_allowed_host()  # Returns normally
+
+# Fail
+config.SERVER_HOST   = 'evil.attacker.com'
+config.ALLOWED_HOSTS = ['c2.lab.internal']
+_check_allowed_host()  # Exits with code 1
+```
+
+---
+
+### `_check_debugger() -> None`
+
+<Note>
+Internal function - Windows only. Logs a warning if debugger is attached, but does not exit.
+</Note>
+
+**Platform Support:**
+
+- Windows: Uses `kernel32.IsDebuggerPresent()`
+- Linux/macOS: No-op (returns immediately)
+
+**Logic:**
+
+```python
+if platform.system() != 'Windows':
+    return
+
+try:
+    import ctypes
+    if ctypes.windll.kernel32.IsDebuggerPresent():
+        logger.warning('debugger detected — proceeding in lab mode',
+                       extra={'check': 'debugger'})
+except Exception as e:
+    logger.warning('debugger check failed', extra={'reason': str(e)})
+```
+
+**Behavior:**
+
+- **Debugger present**: Logs warning, continues
+- **No debugger**: Silent, continues
+- **Check fails**: Logs warning, continues
+
+---
+
+### `_check_vm() -> None`
+
+<Note>
+Internal function - detects VM indicators via registry (Windows) or DMI strings (Linux). Logs info only.
+</Note>
+
+**Detection Logic:**
+
+```python
+if platform.system() == 'Windows':
+    indicators = _check_vm_windows()
+elif platform.system() == 'Linux':
+    indicators = _check_vm_linux()
+
+if indicators:
+    logger.info('VM environment detected', extra={
+        'check':      'vm_detection',
+        'indicators': indicators,
+        'platform':   platform.system()
+    })
+```
+
+**Logging:**
+
+```json
+{
+  "check": "vm_detection",
+  "indicators": ["VirtualBox", "vmhgfs"],
+  "platform": "Windows"
+}
+```
+
+---
+
+### `_check_vm_windows() -> list`
+
+<Note>
+Internal function - checks Windows registry for VirtualBox/VMware strings.
+</Note>
+
+**Registry Keys Checked:**
+
+```python
+vm_keys = [
+    (HKEY_LOCAL_MACHINE, r'SOFTWARE\Oracle\VirtualBox Guest Additions'),
+    (HKEY_LOCAL_MACHINE, r'SOFTWARE\VMware, Inc.\VMware Tools'),
+    (HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Services\VBoxGuest'),
+    (HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Services\vmhgfs'),
+]
+```
+
+**Returns:**
+
+```python
+# VirtualBox detected
+return ['VirtualBox Guest Additions', 'VBoxGuest']
+
+# VMware detected
+return ['VMware Tools', 'vmhgfs']
+
+# No VM detected
+return []
+```
+
+**Error Handling:**
+
+```python
+try:
+    winreg.OpenKey(hive, key_path)
+    found.append(key_path.split('\\')[-1])
+except FileNotFoundError:
+    pass  # Key doesn't exist
+except Exception as e:
+    logger.warning('VM registry check failed', extra={'reason': str(e)})
+```
+
+---
+
+### `_check_vm_linux() -> list`
+
+<Note>
+Internal function - checks Linux DMI/system files for hypervisor strings.
+</Note>
+
+**DMI Paths Checked:**
+
+```python
+dmi_paths = [
+    '/sys/class/dmi/id/product_name',
+    '/sys/class/dmi/id/sys_vendor',
+    '/sys/class/dmi/id/board_vendor',
+]
+```
+
+**VM Strings Detected:**
+
+```python
+vm_strings = ['virtualbox', 'vmware', 'qemu', 'kvm', 'xen', 'hyper-v']
+```
+
+**Returns:**
+
+```python
+# KVM detected
+return ['kvm']
+
+# VirtualBox detected
+return ['virtualbox']
+
+# Multiple hypervisors
+return ['vmware', 'qemu']
+
+# No VM detected
+return []
+```
+
+**Error Handling:**
+
+```python
+try:
+    with open(path, 'r') as f:
+        content = f.read().lower()
+        for vm_str in vm_strings:
+            if vm_str in content and vm_str not in found:
+                found.append(vm_str)
+except (FileNotFoundError, PermissionError):
+    pass  # File doesn't exist or no permission
+```
+
+## Exit Codes
+
+| Code | Trigger |
+|------|----------|
+| `1` | `LAB_MODE != '1'` |
+| `1` | Server host not in `ALLOWED_HOSTS` |
+
+## Configuration
+
+All checks use settings from `common.config`:
+
+```python
+from common import config
+
+# Lab mode validation
+config.LAB_MODE_ENV_VAR  = 'LAB_MODE'
+config.LAB_MODE_REQUIRED = '1'
+
+# Host allowlist
+config.SERVER_HOST   = 'c2.lab.internal'
+config.ALLOWED_HOSTS = ['c2.lab.internal', '192.168.100.10', 'localhost']
+```
+
+## Usage Example
+
+**Typical Agent Startup:**
+
+```python
+from agent.environment_checks import check_lab_environment
+from agent.beacon import BeaconLoop
+
+if __name__ == '__main__':
+    try:
+        check_lab_environment()  # Exits if unsafe
+        BeaconLoop().run()       # Safe to start
+    except SystemExit:
+        raise  # Let environment check exits propagate
+```
+
+**Standalone Testing:**
+
+```bash
+export LAB_MODE=1
+python -c "from agent.environment_checks import check_lab_environment; check_lab_environment()"
+```
+
+## Logging
+
+### Critical Failures
+
+**Lab mode invalid:**
+```python
+logger.error('LAB_MODE invalid — refusing to run outside lab', extra={
+    'check':    'lab_mode',
+    'value':    value,
+    'required': config.LAB_MODE_REQUIRED
+})
+```
+
+**Host not allowed:**
+```python
+logger.error('SERVER_HOST not permitted', extra={
+    'check':         'allowed_host',
+    'host':          host,
+    'allowed_hosts': config.ALLOWED_HOSTS
+})
+```
+
+### Warnings
+
+**Debugger detected:**
+```python
+logger.warning('debugger detected — proceeding in lab mode',
+               extra={'check': 'debugger'})
+```
+
+**Check failed:**
+```python
+logger.warning('debugger check failed', extra={'reason': str(e)})
+```
+
+### Info
+
+**VM detected:**
+```python
+logger.info('VM environment detected', extra={
+    'check':      'vm_detection',
+    'indicators': indicators,
+    'platform':   platform.system()
+})
+```
+
+**No VM found:**
+```python
+logger.info('no VM indicators found', extra={
+    'check':    'vm_detection',
+    'platform': platform.system()
+})
+```
+
+**Summary:**
+```python
+logger.info('environment check', extra={
+    'lab_mode_set':      True,
+    'host_allowed':      True,
+    'debugger_detected': False,
+    'vm_detected':       True,
+})
+```
+
+## Self-Test Suite
+
+The module includes comprehensive self-tests:
+
+```bash
+python agent/environment_checks.py
+```
+
+**Test Coverage:**
+
+1. `LAB_MODE=0` causes `sys.exit(1)`
+2. `LAB_MODE` unset causes `sys.exit(1)`
+3. `LAB_MODE=1` passes without exit
+4. Server host not in `ALLOWED_HOSTS` causes `sys.exit(1)`
+5. VM detection does not exit
+6. Debugger check does not exit
+
+**Expected Output:**
+
+```
+Running environment_checks self-test...
+  [OK] LAB_MODE=0 causes sys.exit(1)
+  [OK] LAB_MODE unset causes sys.exit(1)
+  [OK] LAB_MODE=1 passes without exit
+  [OK] SERVER_HOST not in ALLOWED_HOSTS causes sys.exit(1)
+  [OK] VM detection logs and continues without exit
+  [OK] debugger check logs and continues without exit
+
+All environment_checks self-tests passed.
+```
+
+## Security Rationale
+
+<Warning>
+Environment checks are the **first line of defense** against accidental deployment outside the lab.
+</Warning>
+
+### Critical Checks (Exit on Failure)
+
+**1. Lab Mode Enforcement**
+
+Prevents execution on production systems:
+
+```bash
+# Safe - lab environment
+export LAB_MODE=1
+python agent/agent_main.py
+
+# Blocked - production system
+unset LAB_MODE
+python agent/agent_main.py  # Exits immediately
+```
+
+**2. Host Allowlist**
+
+Prevents C2 traffic to unauthorized servers:
+
+```python
+config.SERVER_HOST   = 'c2.lab.internal'     # Safe
+config.SERVER_HOST   = 'attacker.evil.com'   # Blocked, exits
+```
+
+### Informational Checks (Log Only)
+
+**3. Debugger Detection**
+
+Logs debugger presence but doesn't block lab testing:
+
+```
+WARNING: debugger detected — proceeding in lab mode
+```
+
+**4. VM Detection**
+
+Confirms lab environment isolation:
+
+```json
+{
+  "check": "vm_detection",
+  "indicators": ["virtualbox"],
+  "platform": "Linux"
+}
+```
+
+## Platform Support
+
+| Check | Windows | Linux | macOS |
+|-------|---------|-------|-------|
+| Lab Mode | ✓ | ✓ | ✓ |
+| Allowed Host | ✓ | ✓ | ✓ |
+| Debugger | ✓ | - | - |
+| VM Detection | ✓ | ✓ | - |
+
+## Best Practices
+
+### 1. Always Check Before Beacon Loop
+
+```python
+# Good
+check_lab_environment()
+BeaconLoop().run()
+
+# Bad - no validation
+BeaconLoop().run()  # Dangerous!
+```
+
+### 2. Let SystemExit Propagate
+
+```python
+try:
+    check_lab_environment()
+    BeaconLoop().run()
+except SystemExit:
+    raise  # Don't catch environment check exits
+```
+
+### 3. Configure Allowlist Restrictively
+
+```python
+# Good - specific lab hosts
+config.ALLOWED_HOSTS = ['c2.lab.internal', '192.168.100.10']
+
+# Bad - overly permissive
+config.ALLOWED_HOSTS = ['*', '0.0.0.0']  # Don't do this
+```
+
+### 4. Test Environment Setup
+
+```bash
+# Verify lab environment is configured correctly
+export LAB_MODE=1
+python agent/environment_checks.py
+```
+
+## Related APIs
+
+- [agent_main](/api/agent/agent-main) - Main entry point using environment checks
+- [config](/api/common/config) - Configuration settings
+- [logger](/api/common/logger) - Logging utilities

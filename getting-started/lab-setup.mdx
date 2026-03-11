@@ -1,0 +1,404 @@
+---
+title: Lab Setup
+description: Configure the isolated lab environment for safe C2 testing
+---
+
+This guide configures a secure, isolated lab environment using VirtualBox VMs. The setup ensures C2 traffic remains contained within a host-only network.
+
+<Warning>
+  **Critical Safety Requirement**: This framework requires `LAB_MODE=1` environment variable. The server will refuse to start without it, preventing accidental deployment on production networks.
+</Warning>
+
+## Lab Topology
+
+The lab consists of three systems on an isolated network:
+
+| System | IP Address | Role | OS |
+|--------|-----------|------|----|
+| Windows Host | 192.168.100.1 | Development, Git operations | Windows 10/11 |
+| Ubuntu VM (c2-server) | 192.168.100.10 | C2 server, Nginx redirector | Ubuntu 22.04 LTS |
+| Windows VM (c2-victim) | 192.168.100.20 | Agent victim machine | Windows 10 |
+
+### Network Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│  Host-Only Network: 192.168.100.0/24           │
+│  (Isolated - No Internet Access)                │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│  Windows Host          Ubuntu VM      Windows VM│
+│  192.168.100.1    192.168.100.10  192.168.100.20│
+│  (Dev Machine)      (C2 Server)      (Victim)   │
+│                                                 │
+└─────────────────────────────────────────────────┘
+         │                  │               │
+         │                  │               │
+    ┌────▼───┐         ┌────▼───┐     ┌────▼───┐
+    │  NAT   │         │  NAT   │     │  NAT   │
+    │Adapter │         │Adapter │     │Adapter │
+    └────┬───┘         └────┬───┘     └────┬───┘
+         │                  │               │
+         └──────────────────┴───────────────┘
+                     Internet
+             (Package Installation Only)
+```
+
+## VirtualBox Configuration
+
+### Step 1: Create Host-Only Network
+
+<Steps>
+  <Step title="Open VirtualBox Network Manager">
+    - Open VirtualBox
+    - Go to **File** → **Host Network Manager**
+    - Click **Create**
+  </Step>
+  
+  <Step title="Configure Network Settings">
+    Set the following values:
+    
+    | Setting | Value |
+    |---------|-------|
+    | Network Name | `vboxnet0` (or similar) |
+    | IPv4 Address | `192.168.100.1` |
+    | IPv4 Network Mask | `255.255.255.0` |
+    | DHCP Server | **Disabled** |
+  </Step>
+</Steps>
+
+### Step 2: Configure Ubuntu VM Network
+
+<Steps>
+  <Step title="Add Network Adapters">
+    In VirtualBox, select the Ubuntu VM → **Settings** → **Network**:
+    
+    **Adapter 1 (NAT - Internet Access)**:
+    - Enable Network Adapter: ✓
+    - Attached to: **NAT**
+    - Adapter Type: `Intel PRO/1000 MT Desktop`
+    
+    **Adapter 2 (Host-Only - C2 Traffic)**:
+    - Enable Network Adapter: ✓
+    - Attached to: **Host-only Adapter**
+    - Name: `vboxnet0`
+    - Adapter Type: `Intel PRO/1000 MT Desktop`
+  </Step>
+  
+  <Step title="Configure Static IP">
+    Boot the Ubuntu VM and edit netplan configuration:
+    
+    ```bash
+    # Disable cloud-init network management
+    sudo bash -c 'echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg'
+    
+    # Edit netplan config
+    sudo nano /etc/netplan/50-cloud-init.yaml
+    ```
+    
+    Add the following configuration:
+    
+    ```yaml
+    network:
+      version: 2
+      ethernets:
+        enp0s3:  # NAT adapter (DHCP)
+          dhcp4: true
+        enp0s8:  # Host-only adapter (Static)
+          addresses:
+            - 192.168.100.10/24
+          dhcp4: false
+    ```
+    
+    Apply the configuration:
+    
+    ```bash
+    sudo netplan apply
+    ip addr show enp0s8  # Verify 192.168.100.10 is assigned
+    ```
+  </Step>
+</Steps>
+
+### Step 3: Configure Windows VM Network
+
+<Steps>
+  <Step title="Add Network Adapters">
+    In VirtualBox, select the Windows VM → **Settings** → **Network**:
+    
+    **Adapter 1 (NAT)**:
+    - Enable Network Adapter: ✓
+    - Attached to: **NAT**
+    
+    **Adapter 2 (Host-Only)**:
+    - Enable Network Adapter: ✓
+    - Attached to: **Host-only Adapter**
+    - Name: `vboxnet0`
+  </Step>
+  
+  <Step title="Configure Static IP">
+    Boot the Windows VM:
+    
+    1. Open **Control Panel** → **Network and Sharing Center**
+    2. Click the **Host-only Adapter** connection
+    3. Click **Properties** → **Internet Protocol Version 4 (TCP/IPv4)**
+    4. Select **Use the following IP address**:
+       - IP Address: `192.168.100.20`
+       - Subnet Mask: `255.255.255.0`
+       - Default Gateway: (leave blank)
+       - DNS: (leave blank)
+    5. Click **OK**
+  </Step>
+  
+  <Step title="Configure DNS Resolution">
+    Edit the Windows hosts file as **Administrator**:
+    
+    ```powershell
+    notepad C:\Windows\System32\drivers\etc\hosts
+    ```
+    
+    Add this line:
+    
+    ```
+    192.168.100.10    c2.lab.internal
+    ```
+    
+    Save and close.
+  </Step>
+</Steps>
+
+## TLS Certificate Generation
+
+Generate a self-signed certificate on the Ubuntu VM for TLS communication.
+
+<Steps>
+  <Step title="Create Certificates Directory">
+    ```bash
+    cd ~/c2-framework
+    mkdir -p certs
+    ```
+  </Step>
+  
+  <Step title="Generate Certificate and Private Key">
+    ```bash
+    openssl req -x509 -newkey rsa:4096 \
+      -keyout certs/server.key \
+      -out certs/server.crt \
+      -days 365 -nodes \
+      -subj "/CN=c2.lab.internal" \
+      -addext "subjectAltName=DNS:c2.lab.internal,IP:192.168.100.10"
+    ```
+    
+    **Parameters Explained**:
+    - `-x509`: Generate self-signed certificate (not a CSR)
+    - `-newkey rsa:4096`: Create 4096-bit RSA private key
+    - `-days 365`: Certificate valid for 1 year
+    - `-nodes`: No passphrase (required for unattended server startup)
+    - `-subj`: Set Common Name to `c2.lab.internal`
+    - `-addext`: Add Subject Alternative Names (hostname + IP)
+  </Step>
+  
+  <Step title="Verify Certificate">
+    ```bash
+    # Check certificate details
+    openssl x509 -in certs/server.crt -text -noout | grep -A1 "Subject:"
+    openssl x509 -in certs/server.crt -text -noout | grep -A2 "Subject Alternative Name"
+    
+    # Verify file permissions
+    ls -l certs/
+    ```
+    
+    Expected output:
+    ```
+    -rw-r--r-- 1 user user 1993 ... server.crt
+    -rw------- 1 user user 3272 ... server.key
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  **Security Critical**:
+  - `certs/server.key` must **NEVER** leave the Ubuntu VM
+  - `certs/server.key` must **NEVER** be committed to Git (already in `.gitignore`)
+  - `certs/server.crt` is safe to copy - it's a public certificate
+</Warning>
+
+## Configuration File Setup
+
+<Steps>
+  <Step title="Create Configuration File">
+    Copy the example config and customize it:
+    
+    ```bash
+    cd ~/c2-framework
+    cp common/config_example.py common/config.py
+    nano common/config.py
+    ```
+  </Step>
+  
+  <Step title="Update Network Settings">
+    Edit the following values in `common/config.py`:
+    
+    ```python
+    # Network
+    ALLOWED_HOSTS = [
+        'c2.lab.internal',
+        '192.168.100.10',
+    ]
+    
+    SERVER_HOST  = 'c2.lab.internal'
+    SERVER_PORT  = 443  # Use 8443 for bare-metal, 443 for Docker
+    BACKEND_PORT = 8443
+    ```
+  </Step>
+  
+  <Step title="Generate Pre-Shared Key">
+    Generate a secure 32-byte key for encryption:
+    
+    ```bash
+    python3 -c "import os; print(os.urandom(32))"
+    ```
+    
+    Copy the output (e.g., `b'\x8a\x3f...'`) and update the config:
+    
+    ```python
+    # Cryptography
+    PRE_SHARED_KEY = b'\x8a\x3f\x2e...'  # Paste your generated key
+    ```
+  </Step>
+  
+  <Step title="Configure Beacon Timing">
+    Adjust beacon intervals for your testing needs:
+    
+    ```python
+    # Beacon timing
+    BEACON_INTERVAL_S = 30  # Set to 5 for active testing
+    JITTER_PCT        = 20  # ±20% random jitter
+    ```
+  </Step>
+  
+  <Step title="Verify Lab Mode">
+    Ensure the lab mode configuration is present:
+    
+    ```python
+    # Lab environment
+    LAB_MODE_ENV_VAR  = 'LAB_MODE'
+    LAB_MODE_REQUIRED = '1'
+    ```
+  </Step>
+</Steps>
+
+## Port Configuration
+
+### Bare-Metal Deployment
+
+Direct Python execution without Docker:
+
+```
+Windows VM (192.168.100.20)
+        |
+        | HTTPS :8443
+        v
+Ubuntu VM (192.168.100.10)
+        |
+        | uvicorn binds 0.0.0.0:8443 (TLS)
+        v
+server/server_main.py
+        |
+        | aiosqlite
+        v
+logs/c2_server.db
+```
+
+**Agent Connection**:
+```python
+SERVER_HOST = 'c2.lab.internal'
+SERVER_PORT = 8443
+```
+
+### Docker Compose Deployment
+
+Containerized with Nginx reverse proxy:
+
+```
+Windows VM (192.168.100.20)
+        |
+        | HTTPS :443
+        v
+Ubuntu VM (192.168.100.10)
+        |
+        | Docker host port 443
+        v
+c2-nginx container (TLS termination, UA filtering)
+        |
+        | HTTP :8443 (Docker network: c2-internal)
+        v
+c2-server container (FastAPI)
+        |
+        | aiosqlite
+        v
+logs/c2_server.db (bind mount)
+```
+
+**Agent Connection**:
+```python
+SERVER_HOST = 'c2.lab.internal'
+SERVER_PORT = 443
+```
+
+<Note>
+  In Docker deployment, port 8443 is **not exposed** to the host. Only Nginx on port 443 is accessible from the Windows VM.
+</Note>
+
+## Verify Lab Setup
+
+### Network Connectivity
+
+```bash
+# From Ubuntu VM - ping Windows VM
+ping -c 4 192.168.100.20
+
+# From Ubuntu VM - ping host
+ping -c 4 192.168.100.1
+```
+
+```powershell
+# From Windows VM - ping Ubuntu VM
+ping 192.168.100.10
+
+# From Windows VM - resolve DNS
+ping c2.lab.internal
+```
+
+### TLS Certificate Validation
+
+```bash
+# Test TLS handshake (after server is running)
+openssl s_client -connect c2.lab.internal:8443 -CAfile certs/server.crt
+```
+
+## Next Steps
+
+With the lab environment configured:
+
+1. **[Quickstart Guide](/getting-started/quickstart)** - Launch the server and connect your first agent
+2. **[Architecture Overview](/concepts/architecture)** - Understand the system design
+
+## Troubleshooting
+
+### Cannot Ping Between VMs
+
+- Verify both VMs are on the same host-only network (`vboxnet0`)
+- Check Windows Firewall: Temporarily disable to test
+- Verify static IPs are correctly configured
+
+### DNS Resolution Fails
+
+- Ensure `C:\Windows\System32\drivers\etc\hosts` has the correct entry
+- Run `ipconfig /flushdns` on Windows VM
+- Try connecting via IP directly: `https://192.168.100.10:8443`
+
+### Certificate Errors
+
+- Verify certificate was generated with SAN extension
+- Check certificate CN matches hostname: `openssl x509 -in certs/server.crt -text -noout | grep Subject`
+- Ensure `certs/server.crt` is copied to Windows VM for agent pinning

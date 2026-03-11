@@ -1,0 +1,188 @@
+---
+title: Traffic Capture
+description: Network packet capture API using tcpdump for PCAP generation
+---
+
+The `traffic_capture` module provides a Python wrapper around tcpdump for capturing network traffic to PCAP files. It handles process management, output path resolution, and filename generation with evasion profile labels.
+
+## Functions
+
+### start_capture()
+
+Start a tcpdump process to capture network packets on a specified interface.
+
+```python
+def start_capture(
+    interface: str,
+    output_file: str,
+    bpf_filter: str = 'tcp port 443',
+) -> subprocess.Popen
+```
+
+**Parameters:**
+- `interface` (str): Network interface to capture on (e.g., `eth0`, `wlan0`)
+- `output_file` (str): Output PCAP filename (automatically placed in `pcaps/` directory)
+- `bpf_filter` (str, optional): BPF filter expression. Default: `'tcp port 443'`
+
+**Returns:**
+- `subprocess.Popen`: The running tcpdump process
+
+**Raises:**
+- `RuntimeError`: If tcpdump is not found on PATH
+
+**Example:**
+```python
+from telemetry.traffic_capture import start_capture, stop_capture
+
+# Start capturing HTTPS traffic
+proc = start_capture(
+    interface='eth0',
+    output_file='beacon_capture.pcap',
+    bpf_filter='tcp port 443'
+)
+
+# ... perform network operations ...
+
+stop_capture(proc)
+```
+
+### stop_capture()
+
+Terminate a running tcpdump process and wait for it to exit cleanly.
+
+```python
+def stop_capture(proc: subprocess.Popen) -> None
+```
+
+**Parameters:**
+- `proc` (subprocess.Popen): The tcpdump process returned by `start_capture()`
+
+**Returns:**
+- None
+
+**Behavior:**
+- Sends SIGTERM to the process
+- Waits up to 5 seconds for graceful exit
+- Sends SIGKILL if timeout expires
+- Logs warnings if process already exited or had to be force-killed
+
+**Example:**
+```python
+import time
+from telemetry.traffic_capture import start_capture, stop_capture
+
+proc = start_capture('eth0', 'test.pcap')
+time.sleep(30)  # Capture for 30 seconds
+stop_capture(proc)
+```
+
+### label_capture()
+
+Generate a timestamped PCAP filename with evasion profile parameters embedded.
+
+```python
+def label_capture(base_name: str, profile: EvasionProfile) -> str
+```
+
+**Parameters:**
+- `base_name` (str): Base name prefix for the capture file
+- `profile` (EvasionProfile): Evasion profile containing jitter and padding parameters
+
+**Returns:**
+- `str`: Formatted filename with pattern: `{base_name}_jitter{pct}_pad{max}_{timestamp}.pcap`
+
+**Example:**
+```python
+from telemetry.traffic_capture import label_capture
+from transport.traffic_profile import EvasionProfile
+
+profile = EvasionProfile(jitter_pct=15, padding_max=128)
+filename = label_capture('beacon', profile)
+# Returns: 'beacon_jitter15_pad128_20260311_143052.pcap'
+```
+
+## Constants
+
+### DEFAULT_BPF_FILTER
+
+Default BPF filter for HTTPS traffic:
+```python
+DEFAULT_BPF_FILTER = 'tcp port 443'
+```
+
+### CAPTURE_DIR
+
+Default directory for storing PCAP files:
+```python
+CAPTURE_DIR = 'pcaps'
+```
+
+### UTC_PLUS_7
+
+Timezone object for UTC+7 (Southeast Asia):
+```python
+UTC_PLUS_7 = timezone(timedelta(hours=7))
+```
+
+## Helper Functions
+
+### timestamp_utc7()
+
+Generate current timestamp in UTC+7 formatted for filenames.
+
+```python
+def timestamp_utc7() -> str
+```
+
+**Returns:**
+- `str`: Timestamp in format `YYYYMMDD_HHMMSS`
+
+### ensure_capture_dir()
+
+Create the capture directory if it does not exist.
+
+```python
+def ensure_capture_dir() -> None
+```
+
+### resolve_output_path()
+
+Ensure capture directory exists and return full path inside it.
+
+```python
+def resolve_output_path(filename: str) -> str
+```
+
+**Parameters:**
+- `filename` (str): Output filename
+
+**Returns:**
+- `str`: Full path within `CAPTURE_DIR`
+
+## Command-Line Usage
+
+The module can be run standalone:
+
+```bash
+# Capture until Ctrl+C
+python -m telemetry.traffic_capture --interface eth0 --output capture.pcap
+
+# Custom BPF filter
+python -m telemetry.traffic_capture --interface eth0 --output capture.pcap --filter 'tcp port 8443'
+
+# Timed capture (10 seconds)
+python -m telemetry.traffic_capture --interface eth0 --output capture.pcap --duration 10
+```
+
+## Requirements
+
+- tcpdump must be installed and available on PATH
+- Root/sudo privileges required on Linux for packet capture
+- Depends on: `common.logger`, `transport.traffic_profile`
+
+## Notes
+
+- All captures are automatically stored in the `pcaps/` directory
+- The module uses structured logging via `common.logger`
+- Process stderr is captured for error reporting
+- Handles SIGINT/SIGTERM for clean shutdown

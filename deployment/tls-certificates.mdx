@@ -1,0 +1,318 @@
+---
+title: TLS Certificates
+description: Generate and manage TLS certificates for C2 server authentication
+---
+
+## Overview
+
+The C2 framework uses TLS certificates for two purposes:
+
+1. **Encryption**: Protect beacon traffic from network interception
+2. **Certificate Pinning**: Prevent man-in-the-middle attacks by validating the server's certificate fingerprint
+
+<Warning>
+The agent **pins the server certificate** at build time. If you regenerate the certificate, you must rebuild the agent executable with the new certificate or it will refuse to connect.
+</Warning>
+
+## Certificate Requirements
+
+The TLS certificate must meet the following requirements:
+
+| Requirement | Value | Reason |
+|-------------|-------|--------|
+| Key size | 4096 bits RSA | Adequate security for lab environment |
+| Validity | 365 days | Long enough for extended testing |
+| Subject CN | `c2.lab.internal` | Matches the DNS name in the agent config |
+| SAN extension | `DNS:c2.lab.internal`, `IP:192.168.100.10` | Allows connection by hostname or IP |
+| Self-signed | Yes | No trusted CA required for lab |
+
+## Generating Certificates
+
+<Steps>
+  <Step title="Create certificate directory">
+    ```bash
+    cd /home/c2server/c2-framework
+    mkdir -p certs
+    ```
+  </Step>
+
+  <Step title="Generate self-signed certificate">
+    ```bash
+    openssl req -x509 -newkey rsa:4096 \
+      -keyout certs/server.key -out certs/server.crt \
+      -days 365 -nodes \
+      -subj "/CN=c2.lab.internal" \
+      -addext "subjectAltName=DNS:c2.lab.internal,IP:192.168.100.10"
+    ```
+    
+    **Parameters explained**:
+    - `-x509`: Generate a self-signed certificate (not a CSR)
+    - `-newkey rsa:4096`: Create a new 4096-bit RSA private key
+    - `-keyout`: Path to save the private key
+    - `-out`: Path to save the certificate
+    - `-days 365`: Certificate valid for 1 year
+    - `-nodes`: Do not encrypt the private key ("no DES")
+    - `-subj`: Certificate subject (Common Name)
+    - `-addext`: Subject Alternative Name extension
+  </Step>
+
+  <Step title="Set file permissions">
+    The private key must be readable by the C2 server process:
+    ```bash
+    chmod 644 certs/server.crt
+    chmod 640 certs/server.key
+    ```
+    
+    For Docker deployment (UID 1000):
+    ```bash
+    chown c2server:c2server certs/server.{crt,key}
+    ```
+    
+    For bare-metal deployment with Nginx:
+    ```bash
+    sudo chown root:www-data certs/server.key
+    ```
+  </Step>
+
+  <Step title="Verify certificate details">
+    Inspect the generated certificate:
+    ```bash
+    openssl x509 -in certs/server.crt -text -noout
+    ```
+    
+    Confirm the following fields:
+    ```
+    Subject: CN = c2.lab.internal
+    X509v3 Subject Alternative Name:
+        DNS:c2.lab.internal, IP Address:192.168.100.10
+    Validity
+        Not Before: ...
+        Not After : ... (365 days from generation)
+    ```
+  </Step>
+</Steps>
+
+## Certificate Pinning in the Agent
+
+The agent validates the server certificate by comparing its SHA-256 fingerprint to a pinned value embedded at build time.
+
+### Extract Certificate Fingerprint
+
+Generate the SHA-256 fingerprint of the server certificate:
+
+```bash
+openssl x509 -in certs/server.crt -noout -fingerprint -sha256
+```
+
+Example output:
+```
+SHA256 Fingerprint=A1:B2:C3:D4:E5:F6:...
+```
+
+### Pin Certificate in Agent
+
+The agent's TLS wrapper (`transport/tls_wrapper.py`) validates the server certificate against the pinned fingerprint:
+
+```python
+# transport/tls_wrapper.py:23
+PINNED_CERT_SHA256 = "A1:B2:C3:D4:E5:F6:..."
+
+def verify_cert_pinning(cert_der: bytes) -> bool:
+    """Verify server cert matches pinned fingerprint."""
+    actual = hashlib.sha256(cert_der).hexdigest().upper()
+    expected = PINNED_CERT_SHA256.replace(":", "")
+    return actual == expected
+```
+
+<Warning>
+If you regenerate the server certificate, you **must** update `PINNED_CERT_SHA256` in `transport/tls_wrapper.py` and rebuild the agent executable.
+</Warning>
+
+## Certificate Deployment
+
+### Docker Compose
+
+The certificate is mounted into both containers via volume mounts:
+
+```yaml
+# docker-compose.yml
+services:
+  c2-server:
+    volumes:
+      - ./certs:/app/certs:ro  # Server reads from /app/certs/
+
+  nginx:
+    volumes:
+      - ./certs:/etc/nginx/certs:ro  # Nginx reads from /etc/nginx/certs/
+```
+
+Nginx configuration references the mounted paths:
+
+```nginx
+# redirector/nginx_docker.conf
+ssl_certificate     /etc/nginx/certs/server.crt;
+ssl_certificate_key /etc/nginx/certs/server.key;
+```
+
+### Bare-Metal
+
+For bare-metal deployment, Nginx reads certificates from the repository:
+
+```nginx
+# redirector/nginx_example.conf
+ssl_certificate     /home/c2server/c2-framework/certs/server.crt;
+ssl_certificate_key /home/c2server/c2-framework/certs/server.key;
+```
+
+Ensure Nginx has read permissions:
+```bash
+sudo chmod 644 /home/c2server/c2-framework/certs/server.crt
+sudo chmod 640 /home/c2server/c2-framework/certs/server.key
+sudo chown root:www-data /home/c2server/c2-framework/certs/server.key
+```
+
+## Testing TLS Connection
+
+### Verify TLS Handshake
+
+Test TLS connection without certificate validation:
+
+```bash
+openssl s_client -connect c2.lab.internal:443 -servername c2.lab.internal
+```
+
+Expected output:
+```
+Certificate chain
+ 0 s:CN = c2.lab.internal
+   i:CN = c2.lab.internal
+   a:PKEY: rsaEncryption, 4096 (bit); sigalg: RSA-SHA256
+   v:NotBefore: ...; NotAfter: ...
+```
+
+### Verify Certificate from Agent VM
+
+From the Windows VM, test TLS connection:
+
+```powershell
+$cert = [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+Invoke-WebRequest -Uri https://c2.lab.internal/beacon -Method POST
+```
+
+### Verify Certificate Pinning
+
+The agent will log a certificate pinning failure if the fingerprint doesn't match:
+
+```json
+{"level": "error", "message": "cert pinning failed", "expected": "A1B2C3...", "actual": "D4E5F6..."}
+```
+
+Check agent logs (`logs/agent.log`) for this error after starting the agent.
+
+## Certificate Rotation
+
+<Steps>
+  <Step title="Generate new certificate">
+    ```bash
+    cd /home/c2server/c2-framework
+    mv certs/server.crt certs/server.crt.old
+    mv certs/server.key certs/server.key.old
+    
+    openssl req -x509 -newkey rsa:4096 \
+      -keyout certs/server.key -out certs/server.crt \
+      -days 365 -nodes \
+      -subj "/CN=c2.lab.internal" \
+      -addext "subjectAltName=DNS:c2.lab.internal,IP:192.168.100.10"
+    ```
+  </Step>
+
+  <Step title="Extract new fingerprint">
+    ```bash
+    openssl x509 -in certs/server.crt -noout -fingerprint -sha256
+    ```
+    
+    Copy the fingerprint output (e.g., `A1:B2:C3:...`).
+  </Step>
+
+  <Step title="Update agent pinned certificate">
+    Edit `transport/tls_wrapper.py` and update the pinned fingerprint:
+    ```python
+    PINNED_CERT_SHA256 = "A1:B2:C3:D4:E5:F6:..."  # New fingerprint
+    ```
+  </Step>
+
+  <Step title="Rebuild agent executable">
+    Rebuild the agent with the new pinned certificate:
+    ```bash
+    cd /home/c2server/c2-framework
+    python -m agent.builder.builder
+    ```
+    
+    Deploy the new executable to the Windows VM.
+  </Step>
+
+  <Step title="Restart C2 server">
+    For Docker deployment:
+    ```bash
+    docker compose restart
+    ```
+    
+    For bare-metal deployment:
+    ```bash
+    sudo systemctl restart nginx
+    # Restart server process (depends on your process manager)
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+**Critical**: Existing agents with the old pinned certificate will **fail to connect** after rotating the certificate. You must deploy the rebuilt agent to all victim machines.
+</Warning>
+
+## Git and Certificate Security
+
+### Committed to Git
+
+- `certs/server.crt` — **Committed** to the repository
+  - Required for agent build process (certificate pinning)
+  - Not sensitive (public key)
+
+### Excluded from Git
+
+- `certs/server.key` — **Never committed** (listed in `.gitignore`)
+  - Contains the private key
+  - Compromising this allows impersonation of the C2 server
+
+Verify `.gitignore` includes:
+```
+certs/server.key
+```
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `Permission denied` reading key | Wrong file permissions | Run `chmod 640 certs/server.key` |
+| `certificate verify failed` from agent | Pinned fingerprint mismatch | Update `PINNED_CERT_SHA256` in tls_wrapper.py |
+| `No such file or directory: server.crt` | Missing certificate | Regenerate certificate with openssl |
+| `unable to load Private Key` | Encrypted private key | Regenerate with `-nodes` flag |
+| `Wrong version number` from agent | Agent using HTTP instead of HTTPS | Verify agent config uses `https://` |
+| `SSL handshake failed` | TLS version mismatch | Enable TLS 1.2+ in nginx config |
+
+## Production Considerations
+
+<Warning>
+This guide describes self-signed certificates for **lab use only**. In production:
+
+- Use certificates signed by a trusted CA (Let's Encrypt, DigiCert, etc.)
+- Implement certificate rotation with a 90-day validity period
+- Store private keys in a hardware security module (HSM) or secrets manager
+- Use domain fronting or CDN to hide the real C2 infrastructure
+- Never reuse certificates across multiple C2 servers
+</Warning>
+
+## Next Steps
+
+- Deploy the server with [Docker Compose](/deployment/docker-deployment)
+- Configure [Nginx Redirector](/deployment/redirector-setup) to use the certificates
+- Set up [Network Configuration](/deployment/network-configuration) for the lab environment

@@ -1,0 +1,190 @@
+---
+title: "Agent-Server Architecture"
+description: "Understanding the client-server model and responsibilities of each component"
+---
+
+## Overview
+
+The C2 framework uses a classic client-server architecture where agents (clients) connect to a central server to receive commands and report results. This design provides centralized control while maintaining operational security through encrypted communications.
+
+## Components
+
+### Server
+
+The server is built with FastAPI and handles all inbound agent communications through a single `/beacon` endpoint.
+
+<Tabs>
+  <Tab title="Server Startup">
+    ```python server/server_main.py
+    @asynccontextmanager
+    async def lifespan(app):
+        # Initialise DB, session manager, and command queue on startup.
+        global db, session_mgr, cmd_queue
+        db          = Database()
+        await db.__aenter__()
+        session_mgr = SessionManager()
+        cmd_queue   = CommandQueue()
+        await session_mgr.restore_from_db(db)
+        logger.info('server started', extra={'port': config.SERVER_PORT})
+
+        yield  # server runs here
+
+        # Shutdown — close DB connection cleanly
+        if db:
+            await db.__aexit__(None, None, None)
+        logger.info('server stopped')
+    ```
+  </Tab>
+  <Tab title="Beacon Endpoint">
+    ```python server/server_main.py
+    @app.post('/beacon')
+    async def beacon(request: Request) -> Response:
+        # Handle all inbound agent messages: CHECKIN, TASK_PULL, TASK_RESULT
+        source_ip = request.client.host if request.client else 'unknown'
+        raw_body  = await request.body()
+
+        # Reject oversized payloads early
+        if len(raw_body) > MAX_BEACON_SIZE:
+            logger.warning('payload too large', extra={
+                'source_ip': source_ip,
+                'payload_size': len(raw_body),
+                'max_allowed': MAX_BEACON_SIZE,
+            })
+            return JSONResponse(status_code=413, content={'error': 'payload too large'})
+    ```
+  </Tab>
+</Tabs>
+
+**Key Responsibilities:**
+- Accept and validate encrypted beacons from agents
+- Manage agent sessions and track last-seen timestamps
+- Queue and dispatch commands to agents
+- Store task results and session data in SQLite database
+- Perform nonce replay detection to prevent replay attacks
+
+<Note>
+The server maintains three core components in global state:
+- `Database` for persistent storage
+- `SessionManager` for tracking active agent sessions
+- `CommandQueue` for managing pending and executing tasks
+</Note>
+
+### Agent
+
+The agent is a lightweight client that runs on target systems and maintains persistent communication with the server.
+
+```python agent/agent_main.py
+if __name__ == '__main__':
+    try:
+        check_lab_environment()
+        BeaconLoop().run()
+    except SystemExit:
+        # check_lab_environment and TERMINATE signal both call sys.exit()
+        raise
+    except Exception as e:
+        logger.error('catastrophic failure — agent exiting', extra={
+            'reason':    str(e),
+            'traceback': traceback.format_exc(),
+        })
+        sys.exit(1)
+```
+
+**Key Responsibilities:**
+- Check in with the server and receive a unique session ID
+- Send periodic beacons (TASK_PULL) to request new commands
+- Execute received commands and capture stdout/stderr/exit code
+- Report task results back to the server
+- Implement exponential back-off on connection failures
+- Terminate gracefully on TERMINATE signal
+
+<Info>
+The agent uses a `BeaconLoop` class that encapsulates all beacon logic, including:
+- Initial CHECKIN to register with the server
+- Periodic TASK_PULL messages with configurable jitter
+- Automatic retry logic with exponential back-off
+- Task execution and result reporting
+</Info>
+
+## Request Flow
+
+The typical interaction flow between agent and server:
+
+1. **Initial Checkin**
+   - Agent sends `CHECKIN` message with system information (hostname, username, OS)
+   - Server creates a new session, assigns a UUID, and stores it in the database
+   - Server responds with the assigned `session_id`
+
+2. **Beacon Loop**
+   - Agent sleeps for configured interval (with jitter)
+   - Agent sends `TASK_PULL` message to check for pending commands
+   - Server checks the command queue for the session
+   - Server responds with either:
+     - `TASK_DISPATCH` containing a command to execute
+     - `TASK_PULL` response with `status: no_task`
+     - `TERMINATE` signal to shut down the agent
+
+3. **Task Execution**
+   - Agent executes the command using the executor module
+   - Agent captures stdout, stderr, exit code, and duration
+   - Agent sends `TASK_RESULT` message with execution data
+   - Server stores the result and marks the task complete
+
+4. **Session Management**
+   - Server updates `last_seen` timestamp on every beacon
+   - Operator can deactivate sessions, causing TERMINATE on next beacon
+   - Sessions persist in the database across server restarts
+
+## Message Dispatch
+
+The server routes all beacon messages through a central dispatcher:
+
+```python server/server_main.py
+async def _dispatch(msg_type: str, session_id: str,
+                    payload: dict, source_ip: str) -> dict | None:
+    # Route message to the correct handler and return the response payload dict
+
+    if msg_type == mf.MSG_CHECKIN:
+        return await _handle_checkin(payload, source_ip)
+
+    if msg_type == mf.MSG_TASK_PULL:
+        return await _handle_task_pull(session_id)
+
+    if msg_type == mf.MSG_TASK_RESULT:
+        return await _handle_task_result(session_id, payload)
+
+    if msg_type == mf.MSG_HEARTBEAT:
+        return await _handle_heartbeat(session_id)
+
+    logger.warning('unknown msg_type', extra={'msg_type': msg_type})
+    return None
+```
+
+Each message type has a dedicated handler that performs validation, business logic, and database operations.
+
+## Security Considerations
+
+<Note>
+**Defense in Depth:**
+- All messages are encrypted with AES-256-GCM
+- Nonce-based replay protection prevents message reuse
+- Session IDs are UUIDs to prevent enumeration
+- Payload size limits (256KB) prevent resource exhaustion
+- Only the `/beacon` endpoint is exposed; all other paths return 404
+</Note>
+
+## Scalability
+
+The current architecture is designed for lab environments with moderate scale:
+
+- **In-memory session state** for fast lookups (restored from DB on startup)
+- **Async I/O** with FastAPI and uvicorn for handling concurrent beacons
+- **SQLite database** for persistence (can be replaced with PostgreSQL for production)
+- **Stateless beacon handling** allows horizontal scaling behind a load balancer
+
+<Info>
+For production deployments with thousands of agents, consider:
+- Redis for distributed session state
+- PostgreSQL for scalable persistent storage
+- Message queue (RabbitMQ, Kafka) for command dispatch
+- Multiple server instances behind a load balancer
+</Info>

@@ -1,0 +1,352 @@
+---
+title: "Cryptography"
+description: "Encryption, key derivation, and authentication mechanisms"
+---
+
+## Overview
+
+The C2 framework uses modern cryptographic primitives to protect all agent-server communications. Every message is encrypted with AES-256-GCM and authenticated with a 16-byte authentication tag, ensuring confidentiality, integrity, and authenticity.
+
+## Encryption Algorithm
+
+The framework uses **AES-256-GCM** (Galois/Counter Mode) for authenticated encryption:
+
+- **AES-256**: Advanced Encryption Standard with 256-bit keys
+- **GCM**: Provides both encryption and authentication in a single operation
+- **Authentication tag**: 16 bytes appended to ciphertext for integrity verification
+
+<Note>
+AES-GCM is the industry standard for authenticated encryption, used in TLS 1.3, IPsec, and many other security protocols. It provides strong security guarantees when used correctly.
+</Note>
+
+### Why AES-GCM?
+
+1. **Authenticated Encryption**: Combines confidentiality and integrity in one primitive
+2. **Performance**: Hardware acceleration available on modern CPUs (AES-NI)
+3. **No Padding Oracle**: GCM mode doesn't require padding, eliminating padding oracle attacks
+4. **Parallel Processing**: CTR mode allows parallel encryption/decryption
+
+## Encryption Implementation
+
+The `encrypt()` function generates a random 12-byte nonce and returns both ciphertext and nonce:
+
+<Tabs>
+  <Tab title="Encryption">
+    ```python common/crypto.py
+    def encrypt(plaintext: bytes, key: bytes) -> tuple[bytes, bytes]:
+        if not plaintext:
+            raise CryptoError("encrypt: plaintext must not be empty")
+
+        if len(key) != KEY_SIZE_BYTES:
+            raise CryptoError(
+                f"encrypt: key must be {KEY_SIZE_BYTES} bytes, got {len(key)}"
+            )
+
+        try:
+            nonce = os.urandom(NONCE_SIZE_BYTES) # nonce is random and unique
+            aesgcm = AESGCM(key)
+            # aesgcm.encrypt() returns ciphertext + 16-byte tag concatenated
+            ciphertext_with_tag = aesgcm.encrypt(nonce, plaintext, None)
+            return ciphertext_with_tag, nonce # nonce isn't secret to allow decryption
+
+        except CryptoError:
+            raise
+        except Exception as e:
+            raise CryptoError(f"encrypt failed: {e}") from e
+    ```
+  </Tab>
+  <Tab title="Decryption">
+    ```python common/crypto.py
+    def decrypt(ciphertext_with_tag: bytes, nonce: bytes, key: bytes) -> bytes:
+        if not ciphertext_with_tag:
+            raise CryptoError("decrypt: ciphertext must not be empty")
+
+        if len(nonce) != NONCE_SIZE_BYTES:
+            raise CryptoError(
+                f"decrypt: nonce must be {NONCE_SIZE_BYTES} bytes, got {len(nonce)}"
+            )
+
+        if len(key) != KEY_SIZE_BYTES:
+            raise CryptoError(
+                f"decrypt: key must be {KEY_SIZE_BYTES} bytes, got {len(key)}"
+            )
+
+        # minimum valid ciphertext is at least 16 bytes (the case of empty plaintext)
+        if len(ciphertext_with_tag) < TAG_SIZE_BYTES:
+            raise CryptoError(
+                f"decrypt: ciphertext too short to contain GCM tag "
+                f"(got {len(ciphertext_with_tag)} bytes, need at least {TAG_SIZE_BYTES})"
+            )
+
+        try:
+            aesgcm = AESGCM(key)
+            # aesgcm.decrypt() verifies the tag and raises InvalidTag if it fails
+            plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, None)
+            return plaintext
+
+        except InvalidTag:
+            raise CryptoError(
+                "decrypt: authentication tag verification failed — "
+                "ciphertext may have been tampered with"
+            )
+        except CryptoError:
+            raise
+        except Exception as e:
+            raise CryptoError(f"decrypt failed: {e}") from e
+    ```
+  </Tab>
+</Tabs>
+
+**Key Points:**
+
+- Each encryption generates a fresh 12-byte nonce using `os.urandom()`
+- The nonce is returned alongside the ciphertext and transmitted in the message
+- The ciphertext includes a 16-byte authentication tag automatically appended by AES-GCM
+- Decryption verifies the tag and raises `InvalidTag` exception if tampered
+
+<Info>
+**Nonce Reuse is Catastrophic:**  
+Reusing a nonce with the same key in AES-GCM breaks confidentiality and authenticity. The framework generates a fresh random nonce for every message to prevent this.
+</Info>
+
+## Key Derivation
+
+The framework uses **HKDF-SHA256** (HMAC-based Key Derivation Function) to derive the session key from a pre-shared key (PSK):
+
+```python common/crypto.py
+def derive_key(psk: bytes, salt: bytes) -> bytes:
+    if not psk:
+        raise CryptoError("derive_key: psk must not be empty")
+    if not salt:
+        raise CryptoError("derive_key: salt must not be empty")
+    try:
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=KEY_SIZE_BYTES,
+            salt=salt,
+            info=HKDF_INFO,
+        )
+        return hkdf.derive(psk)
+
+    except Exception as e:
+        raise CryptoError(f"derive_key failed: {e}") from e
+```
+
+**HKDF Parameters:**
+
+- **Algorithm**: SHA-256 hash function
+- **Length**: 32 bytes (256 bits) for AES-256
+- **Salt**: Fixed value `b'c2-lab-fixed-salt-v1'` (lab environment)
+- **Info**: Context string `b'c2-framework-v1'` for domain separation
+
+### Session Key Derivation
+
+The `get_session_key()` function derives the operational key from the configured PSK:
+
+```python common/crypto.py
+def get_session_key() -> bytes:
+    from common import config   # deferred import to avoid circular imports
+
+    if len(config.PRE_SHARED_KEY) != KEY_SIZE_BYTES:
+        raise CryptoError(
+            f"config.PRE_SHARED_KEY must be exactly {KEY_SIZE_BYTES} bytes, "
+            f"got {len(config.PRE_SHARED_KEY)}. "
+            f"Fix the key length in common/config.py"
+        )
+
+    return derive_key(
+        psk=config.PRE_SHARED_KEY,
+        salt=b'c2-lab-fixed-salt-v1',
+    )
+```
+
+<Note>
+**Lab Environment Notice:**  
+The current implementation uses a fixed salt for simplicity in lab environments. Production deployments should generate unique salts per deployment or use per-agent keys.
+</Note>
+
+## Pre-Shared Key (PSK)
+
+Both agent and server must be configured with the same 32-byte pre-shared key. The PSK is stored in `common/config.py` and must be kept secret:
+
+```python
+PRE_SHARED_KEY = b'your-32-byte-secret-key-here!'
+```
+
+### PSK Distribution
+
+In the lab environment, the PSK is compiled into both the agent and server binaries. For production deployments, consider:
+
+1. **Per-Agent Keys**: Unique PSK for each agent, stored in operator database
+2. **Key Rotation**: Periodic key changes to limit exposure window
+3. **Secure Distribution**: Out-of-band key delivery (USB, encrypted channels)
+4. **Hardware Security Modules**: Store keys in HSM for high-security environments
+
+<Info>
+The framework currently uses a single PSK for all agents to simplify lab exercises. Production C2 frameworks typically use per-agent keys or asymmetric key exchange protocols.
+</Info>
+
+## Encryption Flow
+
+### Agent to Server
+
+1. Agent builds a message dict (e.g., `TASK_PULL`)
+2. Message is serialized to JSON and converted to UTF-8 bytes
+3. Random padding is added to obscure plaintext length
+4. `encrypt()` generates a random 12-byte nonce
+5. Plaintext is encrypted with AES-256-GCM using the session key
+6. Ciphertext (including 16-byte tag) and nonce are framed into binary envelope
+7. Envelope is sent via HTTPS POST to `/beacon`
+
+### Server to Agent
+
+1. Server receives binary envelope from agent
+2. Header is validated (magic, version, length)
+3. Nonce is extracted from first 12 bytes of body
+4. Remaining bytes are passed to `decrypt()` as ciphertext+tag
+5. `decrypt()` verifies authentication tag (raises exception if invalid)
+6. Plaintext is decrypted and padding is stripped
+7. JSON payload is parsed into a dict
+8. Server processes the message and builds a response
+9. Response follows the same encryption flow back to the agent
+
+<Tabs>
+  <Tab title="Full Encryption Stack">
+    ```python
+    # Agent side - sending a message
+    payload_dict = mf.build_task_pull(session_id)
+    plaintext    = json.dumps(payload_dict).encode('utf-8')
+    plaintext    = pad(plaintext, min_pad, max_pad)  # random padding
+    ct, nonce    = encrypt(plaintext, session_key)
+    body         = nonce + ct
+    header       = struct.pack('!HBI', MAGIC, VERSION, len(body))
+    envelope     = header + body
+    # Send envelope via HTTPS
+    ```
+  </Tab>
+  <Tab title="Full Decryption Stack">
+    ```python
+    # Server side - receiving a message
+    envelope = await request.body()
+    magic, version, body_len = struct.unpack('!HBI', envelope[:7])
+    # Validate magic and version
+    body         = envelope[7:7+body_len]
+    nonce        = body[:12]
+    ct_with_tag  = body[12:]
+    plaintext    = decrypt(ct_with_tag, nonce, session_key)
+    plaintext    = strip_padding(plaintext)
+    payload_dict = json.loads(plaintext.decode('utf-8'))
+    # Process message
+    ```
+  </Tab>
+</Tabs>
+
+## Authentication Guarantees
+
+AES-GCM provides strong authentication guarantees:
+
+### Message Integrity
+
+The 16-byte authentication tag ensures that any modification to the ciphertext will be detected:
+
+```python
+except InvalidTag:
+    raise CryptoError(
+        "decrypt: authentication tag verification failed — "
+        "ciphertext may have been tampered with"
+    )
+```
+
+Attackers cannot modify encrypted messages without breaking the authentication tag, which would cause decryption to fail.
+
+### Message Authenticity
+
+Only parties possessing the session key can create valid ciphertexts. This proves that messages originated from a trusted source (agent or server).
+
+<Note>
+**Authenticated Encryption vs. Encrypt-then-MAC:**  
+AES-GCM is an AEAD (Authenticated Encryption with Associated Data) mode that provides both confidentiality and authenticity in a single operation. This is preferable to separate encrypt-then-MAC schemes because it's harder to use incorrectly.
+</Note>
+
+## Replay Protection
+
+While AES-GCM prevents tampering, it doesn't prevent replay attacks. The framework adds an additional layer:
+
+```python common/message_format.py
+def _base_payload(msg_type: str, session_id: str = None) -> dict:
+    """Return mandatory fields present in every message."""
+    return {
+        'msg_type':   msg_type,
+        'session_id': session_id,
+        'timestamp':  int(time.time()),
+        'nonce':      uuid.uuid4().hex,   # replay protection
+        'payload':    {},
+    }
+```
+
+Every message includes a unique nonce (UUID) that the server checks:
+
+```python server/server_main.py
+if not await db.check_and_store_nonce(nonce):
+    logger.warning('replay detected', extra={
+        'session_id': session_id,
+        'nonce':      nonce,
+    })
+    return JSONResponse(status_code=409, content={'error': 'replay detected'})
+```
+
+This prevents attackers from recording and replaying valid encrypted messages.
+
+<Info>
+**Why not use the AES-GCM nonce for replay protection?**  
+The GCM nonce is only 12 bytes and is used for encryption/decryption. A separate application-level nonce (UUID) is stored in the database to track seen messages, providing defense-in-depth.
+</Info>
+
+## Security Considerations
+
+### Strengths
+
+1. **Strong Encryption**: AES-256-GCM is industry standard and well-analyzed
+2. **Authenticated Encryption**: Combines confidentiality and integrity
+3. **Random Nonces**: Prevents nonce reuse vulnerabilities
+4. **Replay Protection**: Database-backed nonce tracking prevents replay attacks
+5. **Traffic Padding**: Random padding obscures message sizes
+
+### Limitations
+
+1. **Static PSK**: All agents share the same key in lab environment
+2. **No Forward Secrecy**: Compromised PSK decrypts all past communications
+3. **No Key Rotation**: Session key never changes during deployment
+4. **Fixed Salt**: Salt is hardcoded rather than randomly generated
+
+### Production Recommendations
+
+<Note>
+**For Production Deployments:**
+- Implement per-agent keys or asymmetric key exchange (ECDHE)
+- Add forward secrecy with ephemeral session keys
+- Implement key rotation policies
+- Use unique salts per deployment
+- Consider certificate-based agent authentication
+- Store keys in hardware security modules (HSMs)
+</Note>
+
+## Cryptographic Constants
+
+```python common/crypto.py
+NONCE_SIZE_BYTES = 12    # GCM nonce size
+KEY_SIZE_BYTES   = 32    # AES-256 key size
+TAG_SIZE_BYTES   = 16    # GCM authentication tag length
+HKDF_INFO        = b'c2-framework-v1'  # context label for HKDF
+```
+
+These constants define the cryptographic parameters used throughout the framework:
+
+- **12-byte nonce**: Standard size for AES-GCM (96 bits)
+- **32-byte key**: AES-256 requires 256-bit (32-byte) keys
+- **16-byte tag**: Standard GCM tag size for 128-bit security
+- **HKDF info**: Context string for domain separation in key derivation
+
+<Info>
+Changing these constants would break protocol compatibility. Any modifications require synchronized updates to both agent and server code.
+</Info>

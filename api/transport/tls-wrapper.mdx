@@ -1,0 +1,316 @@
+---
+title: TLS Wrapper
+description: TLS certificate pinning and verification for secure C2 communication
+---
+
+## Overview
+
+The TLS wrapper provides certificate pinning functionality to ensure implants only communicate with trusted C2 servers. It creates SSL contexts configured for self-signed lab certificates and provides fingerprint verification.
+
+**Module**: `transport.tls_wrapper`
+
+## Functions
+
+### create_ssl_context()
+
+Creates a TLS client context pinned to a specific certificate file.
+
+```python
+def create_ssl_context(cert_path: str) -> ssl.SSLContext:
+    """
+    Create a TLS client context pinned to the lab self-signed cert.
+    """
+```
+
+#### Parameters
+
+<ParamField path="cert_path" type="str" required>
+  Absolute or relative path to the PEM-encoded TLS certificate file.
+  
+  Example: `certs/server.crt`
+</ParamField>
+
+#### Returns
+
+<ResponseField name="ssl.SSLContext">
+  Configured SSL context with:
+  - Minimum TLS version: **TLSv1.2**
+  - Verify mode: **CERT_REQUIRED**
+  - Hostname checking: **Disabled** (lab certs use IP addresses)
+  - Certificate loaded from `cert_path`
+</ResponseField>
+
+#### Raises
+
+<ResponseField name="FileNotFoundError">
+  Raised when the certificate file does not exist at the specified path
+</ResponseField>
+
+#### Security Configuration
+
+The SSL context is configured with strict security requirements:
+
+```python
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # Require TLS 1.2+
+ctx.load_verify_locations(cert_path)          # Pin to specific cert
+ctx.check_hostname = False                     # Lab cert uses IP in CN
+ctx.verify_mode = ssl.CERT_REQUIRED           # Always verify certificate
+```
+
+### get_cert_fingerprint()
+
+Computes the SHA-256 fingerprint of a certificate for verification.
+
+```python
+def get_cert_fingerprint(cert_path: str) -> str:
+    """
+    Load the DER-encoded cert and return its SHA-256 fingerprint as a hex string.
+    """
+```
+
+#### Parameters
+
+<ParamField path="cert_path" type="str" required>
+  Path to the PEM-encoded certificate file
+</ParamField>
+
+#### Returns
+
+<ResponseField name="fingerprint" type="str">
+  64-character lowercase hexadecimal SHA-256 fingerprint of the certificate
+  
+  Example: `a3c4f5e2d1b8c7a6f9e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2`
+</ResponseField>
+
+#### Raises
+
+<ResponseField name="FileNotFoundError">
+  Raised when the certificate file does not exist
+</ResponseField>
+
+## Usage Examples
+
+### Basic SSL Context Creation
+
+```python
+import ssl
+from transport.tls_wrapper import create_ssl_context
+
+# Create context pinned to lab certificate
+ctx = create_ssl_context('certs/server.crt')
+
+print(f"Minimum TLS version: {ctx.minimum_version}")
+print(f"Verify mode: {ctx.verify_mode}")
+# Output:
+# Minimum TLS version: TLSVersion.TLSv1_2
+# Verify mode: VerifyMode.CERT_REQUIRED
+```
+
+### Using with Requests Library
+
+```python
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.poolmanager import PoolManager
+from transport.tls_wrapper import create_ssl_context
+
+class TLSAdapter(HTTPAdapter):
+    """Forces requests to use a pinned SSL context."""
+    
+    def __init__(self, ssl_context):
+        self._ssl_context = ssl_context
+        super().__init__()
+    
+    def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
+        kwargs['ssl_context'] = self._ssl_context
+        return super().init_poolmanager(connections, maxsize, block, **kwargs)
+
+# Create pinned session
+ctx = create_ssl_context('certs/server.crt')
+session = requests.Session()
+session.mount('https://', TLSAdapter(ctx))
+
+# All requests now use pinned certificate
+response = session.post('https://192.168.100.10:8443/beacon', data=b'...')
+```
+
+### Certificate Fingerprint Verification
+
+```python
+from transport.tls_wrapper import get_cert_fingerprint
+
+# Get fingerprint of server certificate
+fingerprint = get_cert_fingerprint('certs/server.crt')
+print(f"Server cert fingerprint: {fingerprint}")
+
+# Compare with known-good fingerprint
+EXPECTED_FINGERPRINT = 'a3c4f5e2d1b8c7a6f9e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2'
+
+if fingerprint == EXPECTED_FINGERPRINT:
+    print("Certificate verified successfully")
+else:
+    print("WARNING: Certificate fingerprint mismatch!")
+    print(f"Expected: {EXPECTED_FINGERPRINT}")
+    print(f"Got:      {fingerprint}")
+```
+
+### Automated Certificate Validation
+
+```python
+import os
+from transport.tls_wrapper import create_ssl_context, get_cert_fingerprint
+from common import config
+
+def validate_server_certificate() -> bool:
+    """Validate that the server certificate exists and is valid."""
+    cert_path = config.TLS_CERT_PATH
+    
+    # Check file exists
+    if not os.path.exists(cert_path):
+        print(f"ERROR: Certificate not found at {cert_path}")
+        return False
+    
+    try:
+        # Get fingerprint (validates cert can be parsed)
+        fp = get_cert_fingerprint(cert_path)
+        print(f"Certificate fingerprint: {fp}")
+        
+        # Create SSL context (validates cert can be loaded)
+        ctx = create_ssl_context(cert_path)
+        print(f"SSL context created successfully")
+        
+        return True
+    except Exception as e:
+        print(f"Certificate validation failed: {e}")
+        return False
+
+# Run validation
+if validate_server_certificate():
+    print("Server certificate is valid")
+else:
+    print("Server certificate validation failed")
+```
+
+### Fingerprint Comparison Utility
+
+```python
+from transport.tls_wrapper import get_cert_fingerprint
+
+def compare_certificates(cert1_path: str, cert2_path: str) -> bool:
+    """Compare two certificates by fingerprint."""
+    fp1 = get_cert_fingerprint(cert1_path)
+    fp2 = get_cert_fingerprint(cert2_path)
+    
+    print(f"Certificate 1: {fp1}")
+    print(f"Certificate 2: {fp2}")
+    
+    if fp1 == fp2:
+        print("Certificates are identical")
+        return True
+    else:
+        print("Certificates differ")
+        return False
+
+# Example: Verify backup cert matches production
+compare_certificates(
+    'certs/server.crt',
+    'backup/server.crt.bak'
+)
+```
+
+## Certificate Requirements
+
+### File Format
+
+Certificates must be in **PEM format**:
+
+```
+-----BEGIN CERTIFICATE-----
+MIIDXTCCAkWgAwIBAgIJAKL3vkN5Qn8pMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
+BAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX
+...
+-----END CERTIFICATE-----
+```
+
+### TLS Version Requirements
+
+- **Minimum**: TLSv1.2
+- **Recommended**: TLSv1.3
+- **Blocked**: SSLv3, TLSv1.0, TLSv1.1 (deprecated)
+
+### Lab Certificate Setup
+
+For lab environments using self-signed certificates:
+
+1. Copy `server.crt` from the Ubuntu VM to the implant machine
+2. Place in the `certs/` directory
+3. Update `config.TLS_CERT_PATH` to point to the certificate
+4. Verify with `get_cert_fingerprint()`
+
+```bash
+# On Ubuntu VM
+scp certs/server.crt user@implant-machine:~/workspace/certs/
+
+# On implant machine
+python3 -c "from transport.tls_wrapper import get_cert_fingerprint; print(get_cert_fingerprint('certs/server.crt'))"
+```
+
+## Security Considerations
+
+### Why Certificate Pinning?
+
+Certificate pinning prevents man-in-the-middle attacks by ensuring the implant only trusts a specific certificate, not just any certificate signed by a trusted CA.
+
+**Without pinning**:
+- Implant trusts any valid certificate
+- Attacker with CA-signed cert can intercept traffic
+
+**With pinning**:
+- Implant only trusts the specific C2 certificate
+- MITM attacks fail even with valid certificates
+
+### Hostname Verification Disabled
+
+```python
+ctx.check_hostname = False  # Lab cert uses IP, not hostname in CN
+```
+
+**Why disabled?** Lab certificates use IP addresses (e.g., `192.168.100.10`) in the Common Name field instead of hostnames. Standard hostname verification would fail.
+
+**Security impact**: Minimal, because we use certificate pinning. The exact certificate is verified, making hostname checking redundant.
+
+## Logging
+
+Certificate operations are logged for audit purposes:
+
+```python
+logger.info('pinned cert fingerprint', extra={
+    'cert_path': '/absolute/path/to/certs/server.crt',
+    'fingerprint': 'a3c4f5e2d1b8c7a6f9e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2'
+})
+```
+
+## Error Handling
+
+```python
+from transport.tls_wrapper import create_ssl_context, get_cert_fingerprint
+
+try:
+    ctx = create_ssl_context('certs/server.crt')
+except FileNotFoundError:
+    print("Certificate file not found")
+    print("Copy certs/server.crt from the Ubuntu VM")
+    exit(1)
+
+try:
+    fp = get_cert_fingerprint('certs/nonexistent.crt')
+except FileNotFoundError as e:
+    print(f"Error: {e}")
+```
+
+## Related APIs
+
+- [HTTP Transport](/api/transport/http-transport) - Uses TLS wrapper for secure beaconing
+- [Configuration](/api/core/config) - TLS certificate path configuration
+- [Logger](/api/core/logger) - Certificate loading and fingerprint logging

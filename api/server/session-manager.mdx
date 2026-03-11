@@ -1,0 +1,471 @@
+---
+title: 'SessionManager'
+description: 'In-memory session state management with database persistence'
+icon: 'users'
+---
+
+## Overview
+
+SessionManager holds all active agent sessions in memory for fast access, synchronized to the database on every mutation. It provides thread-safe operations using asyncio locks.
+
+**Source:** `server/session_manager.py`
+
+## SessionState Dataclass
+
+```python
+@dataclass
+class SessionState:
+    session_id: str
+    hostname:   str
+    username:   str
+    os:         str
+    agent_ver:  str
+    first_seen: float
+    last_seen:  float
+    jitter_pct: int
+    active:     bool = True
+```
+
+Represents the state of a single agent session.
+
+<ParamField path="session_id" type="str">
+  Unique UUID for the session
+</ParamField>
+
+<ParamField path="hostname" type="str">
+  Agent's hostname
+</ParamField>
+
+<ParamField path="username" type="str">
+  Current username on agent system
+</ParamField>
+
+<ParamField path="os" type="str">
+  Operating system version (e.g., "Windows 10 22H2")
+</ParamField>
+
+<ParamField path="agent_ver" type="str">
+  Agent version string (e.g., "1.0.0")
+</ParamField>
+
+<ParamField path="first_seen" type="float">
+  Unix timestamp when agent first checked in
+</ParamField>
+
+<ParamField path="last_seen" type="float">
+  Unix timestamp of last activity (beacon, heartbeat)
+</ParamField>
+
+<ParamField path="jitter_pct" type="int">
+  Beacon jitter percentage (0-100)
+</ParamField>
+
+<ParamField path="active" type="bool" default="True">
+  Whether session is active. Deactivated sessions receive TERMINATE message.
+</ParamField>
+
+## SessionManager Class
+
+### Constructor
+
+```python
+def __init__(self)
+```
+
+Initializes empty session manager with asyncio lock for thread safety.
+
+**Internal State:**
+
+```python
+self._sessions: dict[str, SessionState] = {}
+self._lock = asyncio.Lock()
+```
+
+## Methods
+
+### create_session()
+
+```python
+async def create_session(self, payload: dict, db: Database) -> str
+```
+
+Create a new in-memory SessionState, persist to DB, return session_id.
+
+<ParamField path="payload" type="dict" required>
+  Agent check-in data containing:
+  - `hostname`: Agent hostname
+  - `username`: Current username
+  - `os`: Operating system version
+  - `agent_ver`: Agent version string
+  - `jitter_pct`: Beacon jitter percentage (optional, defaults to 0)
+</ParamField>
+
+<ParamField path="db" type="Database" required>
+  Database instance for persistence
+</ParamField>
+
+<ResponseField name="return" type="str">
+  Newly created session_id (UUID)
+</ResponseField>
+
+**Example:**
+
+```python
+from server.session_manager import SessionManager
+from server.storage import Database
+
+async with Database() as db:
+    mgr = SessionManager()
+    
+    payload = {
+        'hostname': 'VICTIM-PC',
+        'username': 'jdoe',
+        'os': 'Windows 10 22H2',
+        'agent_ver': '1.0.0',
+        'jitter_pct': 20
+    }
+    
+    session_id = await mgr.create_session(payload, db)
+    print(f"Created session: {session_id}")
+    # Output: Created session: 550e8400-e29b-41d4-a716-446655440000
+```
+
+**Behavior:**
+
+- Generates new UUID for session_id
+- Sets first_seen and last_seen to current time
+- Defaults jitter_pct to 0 if not provided
+- Stores session in memory with lock
+- Persists to database
+- Logs creation event
+
+### get_session()
+
+```python
+async def get_session(self, session_id: str) -> SessionState | None
+```
+
+Return the in-memory SessionState for session_id, or None if not found.
+
+<ParamField path="session_id" type="str" required>
+  UUID of the session to retrieve
+</ParamField>
+
+<ResponseField name="return" type="SessionState | None">
+  SessionState object if found, None otherwise
+</ResponseField>
+
+**Example:**
+
+```python
+session = await mgr.get_session('550e8400-e29b-41d4-a716-446655440000')
+if session:
+    print(f"Hostname: {session.hostname}")
+    print(f"Last seen: {session.last_seen}")
+    print(f"Active: {session.active}")
+else:
+    print("Session not found")
+```
+
+**Performance:** O(1) dictionary lookup with async lock
+
+### update_last_seen()
+
+```python
+async def update_last_seen(self, session_id: str, db: Database) -> None
+```
+
+Update last_seen in memory and persist to DB.
+
+<ParamField path="session_id" type="str" required>
+  UUID of the session to update
+</ParamField>
+
+<ParamField path="db" type="Database" required>
+  Database instance for persistence
+</ParamField>
+
+**Example:**
+
+```python
+# Called on every beacon/heartbeat
+await mgr.update_last_seen(session_id, db)
+```
+
+**Behavior:**
+
+- Updates `session.last_seen` to `time.time()`
+- Only updates if session exists in memory
+- Persists change to database
+- Silent no-op if session not found
+
+### list_sessions()
+
+```python
+async def list_sessions(self) -> list[SessionState]
+```
+
+Return all in-memory sessions ordered by last_seen descending.
+
+<ResponseField name="return" type="list[SessionState]">
+  List of SessionState objects sorted by most recent activity first
+</ResponseField>
+
+**Example:**
+
+```python
+sessions = await mgr.list_sessions()
+
+for session in sessions:
+    status = "Active" if session.active else "Inactive"
+    print(f"{session.hostname} ({session.username}) - {status}")
+    print(f"  Last seen: {session.last_seen}")
+    print(f"  Session ID: {session.session_id}")
+```
+
+**Output:**
+```
+VICTIM-PC-2 (bob) - Active
+  Last seen: 1710177845.23
+  Session ID: 660e8400-e29b-41d4-a716-446655440000
+VICTIM-PC (jdoe) - Inactive
+  Last seen: 1710177800.12
+  Session ID: 550e8400-e29b-41d4-a716-446655440000
+```
+
+**Use Cases:**
+- CLI `sessions` command
+- Web UI session listing
+- Monitoring dashboards
+
+### deactivate_session()
+
+```python
+async def deactivate_session(self, session_id: str, db: Database) -> None
+```
+
+Mark session inactive in memory and persist to DB.
+
+<ParamField path="session_id" type="str" required>
+  UUID of the session to deactivate
+</ParamField>
+
+<ParamField path="db" type="Database" required>
+  Database instance for persistence
+</ParamField>
+
+**Example:**
+
+```python
+# Operator kills session via CLI
+await mgr.deactivate_session(session_id, db)
+
+# Next beacon from this agent will receive TERMINATE message
+```
+
+**Behavior:**
+
+- Sets `session.active = False` in memory
+- Persists to database (sets active=0)
+- Logs deactivation event
+- Agent receives TERMINATE on next beacon
+- Silent no-op if session not found
+
+**Note:** Deactivated sessions remain in memory and database for audit/historical purposes.
+
+### restore_from_db()
+
+```python
+async def restore_from_db(self, db: Database) -> None
+```
+
+Reload active sessions from DB into memory on server restart.
+
+<ParamField path="db" type="Database" required>
+  Database instance to restore from
+</ParamField>
+
+**Example:**
+
+```python
+# Called during server startup
+mgr = SessionManager()
+await mgr.restore_from_db(db)
+logger.info('sessions restored from DB', extra={'count': len(mgr._sessions)})
+```
+
+**Behavior:**
+
+- Fetches all session rows from database
+- Only restores sessions where `active=1`
+- Reconstructs SessionState objects in memory
+- Logs count of restored sessions
+
+**Use Case:** Server restart without losing active agent sessions
+
+## Usage Patterns
+
+### Complete Session Lifecycle
+
+```python
+async with Database() as db:
+    mgr = SessionManager()
+    
+    # Server startup: restore existing sessions
+    await mgr.restore_from_db(db)
+    
+    # Agent checks in
+    payload = {
+        'hostname': 'VICTIM-PC',
+        'username': 'jdoe',
+        'os': 'Windows 10 22H2',
+        'agent_ver': '1.0.0',
+        'jitter_pct': 20
+    }
+    session_id = await mgr.create_session(payload, db)
+    
+    # Agent beacons periodically
+    await mgr.update_last_seen(session_id, db)
+    
+    # Operator lists sessions
+    sessions = await mgr.list_sessions()
+    for s in sessions:
+        if s.active:
+            print(f"Active: {s.hostname}")
+    
+    # Operator kills session
+    await mgr.deactivate_session(session_id, db)
+    
+    # Next beacon: server checks session status
+    session = await mgr.get_session(session_id)
+    if not session.active:
+        # Send TERMINATE message to agent
+        pass
+```
+
+### Thread Safety
+
+All methods use `async with self._lock` for thread-safe access to `_sessions` dict:
+
+```python
+async with self._lock:
+    self._sessions[session_id] = state
+```
+
+This ensures safe concurrent access from multiple beacon requests.
+
+## Integration Points
+
+### Server Main
+
+Used in `server_main.py` beacon handlers:
+
+```python
+from server.session_manager import SessionManager
+
+session_mgr = SessionManager()
+
+# Check-in handler
+session_id = await session_mgr.create_session(payload, db)
+
+# Task pull handler
+session = await session_mgr.get_session(session_id)
+if not session:
+    return None  # Invalid session
+await session_mgr.update_last_seen(session_id, db)
+```
+
+### CLI Commands
+
+Used in `cli/session_commands.py`:
+
+```python
+# List active sessions
+sessions = await session_mgr.list_sessions()
+for session in sessions:
+    if session.active:
+        print_session(session)
+
+# Kill session
+await session_mgr.deactivate_session(session_id, db)
+```
+
+## Testing
+
+### Self-Test Suite
+
+Run built-in tests:
+
+```bash
+python -m server.session_manager
+```
+
+**Test Coverage:**
+- create_session generates valid UUID
+- get_session returns correct state
+- get_session returns None for unknown ID
+- update_last_seen advances timestamp
+- list_sessions sorts by last_seen descending
+- deactivate_session sets active flag
+- restore_from_db only loads active sessions
+
+**Output:**
+```
+Running session_manager self-test...
+  [OK] create_session
+  [OK] get_session
+  [OK] get_session returns None for unknown session_id
+  [OK] update_last_seen
+  [OK] list_sessions
+  [OK] deactivate_session
+  [OK] restore_from_db
+
+All session_manager self-tests passed.
+```
+
+## Logging
+
+Structured logging with contextual fields:
+
+```python
+logger.info('session created',
+            extra={'session_id': session_id, 'hostname': state.hostname})
+```
+
+**Events:**
+- Session created
+- Session deactivated
+- Sessions restored from DB
+
+## Performance Considerations
+
+<AccordionGroup>
+  <Accordion title="Memory Usage">
+    All active sessions held in memory. For 10,000 agents, SessionState objects consume ~2-3 MB RAM.
+  </Accordion>
+
+  <Accordion title="Lock Contention">
+    Single lock protects _sessions dict. Read operations like get_session are fast. High beacon rates may see contention.
+  </Accordion>
+
+  <Accordion title="Database Sync">
+    Every mutation (create, update_last_seen, deactivate) writes to DB. Uses async I/O for non-blocking operations.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Server Main" icon="server" href="/api/server/server-main">
+    FastAPI beacon endpoint integration
+  </Card>
+  <Card title="Database" icon="database" href="/api/server/storage">
+    Session persistence layer
+  </Card>
+  <Card title="CommandQueue" icon="list" href="/api/server/command-queue">
+    Task management per session
+  </Card>
+  <Card title="Session Commands" icon="terminal" href="/api/cli/session-commands">
+    CLI session management
+  </Card>
+</CardGroup>

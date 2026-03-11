@@ -1,0 +1,255 @@
+---
+title: 'Configuration'
+description: 'Framework-wide configuration variables and constants'
+icon: 'gear'
+---
+
+## Overview
+
+The configuration module defines all framework-wide settings including network parameters, cryptography keys, logging configuration, and security controls.
+
+**File:** `common/config_example.py` (actual `common/config.py` not committed to repository)
+
+<Warning>
+  The actual `config.py` file should never be committed to version control as it contains sensitive key material. Use `config_example.py` as a template.
+</Warning>
+
+## Network Configuration
+
+<ParamField path="ALLOWED_HOSTS" type="list[str]" default="['c2.lab.internal', '192.168.100.10']">
+  List of allowed hostnames/IPs for the C2 server. Used for host header validation.
+</ParamField>
+
+<ParamField path="SERVER_HOST" type="str" default="'c2.lab.internal'">
+  C2 server hostname or IP address
+</ParamField>
+
+<ParamField path="SERVER_PORT" type="int" default="443">
+  Server port for HTTPS connections
+</ParamField>
+
+<ParamField path="BACKEND_PORT" type="int" default="8443">
+  Backend port when running behind a reverse proxy
+</ParamField>
+
+## TLS Configuration
+
+<ParamField path="TLS_CERT_PATH" type="str" default="'certs/server.crt'">
+  Path to TLS certificate file for HTTPS
+</ParamField>
+
+## Beacon Timing
+
+<ParamField path="BEACON_INTERVAL_S" type="int" default="30">
+  Base beacon interval in seconds. Agents check in at this frequency (before jitter).
+  
+  <Tip>Set to 5 seconds for lab experiments, 30-300 for production</Tip>
+</ParamField>
+
+<ParamField path="JITTER_PCT" type="int" default="20">
+  Jitter percentage (0-100) applied to beacon interval. Adds randomness to avoid pattern detection.
+  
+  **Formula:** `actual_interval = BEACON_INTERVAL_S * (1 ± JITTER_PCT/100)`
+</ParamField>
+
+## Traffic Padding
+
+<ParamField path="PADDING_MIN_BYTES" type="int" default="0">
+  Minimum padding to add to messages in bytes
+</ParamField>
+
+<ParamField path="PADDING_MAX_BYTES" type="int" default="128">
+  Maximum padding to add to messages in bytes. Random amount between min and max is added to each message.
+</ParamField>
+
+## Cryptography
+
+<ParamField path="PRE_SHARED_KEY" type="bytes" required>
+  32-byte pre-shared key for session key derivation
+  
+  **Default:** `b'REPLACE_WITH_REAL_32_BYTE_KEY!!!'`
+  
+  <Warning>
+    **CRITICAL:** This MUST be replaced with a cryptographically random 32-byte key in production.
+  </Warning>
+</ParamField>
+
+**Generating a secure key:**
+```python
+import os
+
+# Generate a secure random 32-byte key
+PRE_SHARED_KEY = os.urandom(32)
+print(repr(PRE_SHARED_KEY))
+```
+
+## Logging Configuration
+
+<ParamField path="LOG_LEVEL" type="str" default="'INFO'">
+  Logging level. Valid values: `'DEBUG'`, `'INFO'`, `'WARNING'`, `'ERROR'`, `'CRITICAL'`
+</ParamField>
+
+<ParamField path="LOG_DIR" type="str" default="'logs'">
+  Directory path for log files. Created automatically if it doesn't exist.
+</ParamField>
+
+<ParamField path="LOG_MAX_BYTES" type="int" default="5242880">
+  Maximum size of each log file in bytes before rotation (default: 5 MB)
+</ParamField>
+
+<ParamField path="LOG_BACKUP_COUNT" type="int" default="3">
+  Number of rotated log files to keep
+</ParamField>
+
+## Security Controls
+
+<ParamField path="BLOCKED_COMMANDS" type="list[str]">
+  List of command patterns that are blocked for security. Tasks containing these strings will be rejected.
+  
+  **Default blocked commands:**
+  - `'reg'` - Registry modifications
+  - `'schtasks'` - Scheduled tasks
+  - `'at'` - Legacy task scheduler
+  - `'sc'` - Service control
+  - `'net use'` - Network shares
+  - `'arp'` - ARP manipulation
+  - `'nmap'` - Network scanning
+  - `'whoami /priv'` - Privilege enumeration
+  - `'net localgroup'` - Local group enumeration
+</ParamField>
+
+<Note>
+  These blocks are for lab safety. In a red team scenario, you would customize this list based on scope and rules of engagement.
+</Note>
+
+## Lab Environment
+
+<ParamField path="LAB_MODE_ENV_VAR" type="str" default="'LAB_MODE'">
+  Environment variable name to check for lab mode
+</ParamField>
+
+<ParamField path="LAB_MODE_REQUIRED" type="str" default="'1'">
+  Required value for lab mode environment variable
+</ParamField>
+
+<ParamField path="BEHIND_NGINX" type="bool" default="False">
+  Set to `True` when running behind nginx reverse proxy. Read from `BEHIND_NGINX` environment variable.
+  
+  ```python
+  BEHIND_NGINX = os.environ.get('BEHIND_NGINX', '0') == '1'
+  ```
+</ParamField>
+
+## Configuration Example
+
+Here's a complete example configuration:
+
+```python
+import os
+
+# Network
+ALLOWED_HOSTS = [
+    'c2.lab.internal',
+    '192.168.100.10',
+]
+
+SERVER_HOST  = 'c2.lab.internal'
+SERVER_PORT  = 443
+BACKEND_PORT = 8443
+
+# TLS
+TLS_CERT_PATH = 'certs/server.crt'
+
+# Beacon timing
+BEACON_INTERVAL_S = 30
+JITTER_PCT        = 20
+
+# Traffic padding
+PADDING_MIN_BYTES = 0
+PADDING_MAX_BYTES = 128
+
+# Cryptography - REPLACE THIS!
+PRE_SHARED_KEY = os.urandom(32)
+
+# Logging
+LOG_LEVEL        = 'INFO'
+LOG_DIR          = 'logs'
+LOG_MAX_BYTES    = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
+
+# Security controls
+BLOCKED_COMMANDS = [
+    'reg',
+    'schtasks',
+    'at',
+    'sc',
+    'net use',
+    'arp',
+    'nmap',
+    'whoami /priv',
+    'net localgroup',
+]
+
+# Lab environment
+LAB_MODE_ENV_VAR  = 'LAB_MODE'
+LAB_MODE_REQUIRED = '1'
+BEHIND_NGINX = os.environ.get('BEHIND_NGINX', '0') == '1'
+```
+
+## Usage
+
+Import configuration variables anywhere in the codebase:
+
+```python
+from common import config
+
+print(f"Server: {config.SERVER_HOST}:{config.SERVER_PORT}")
+print(f"Beacon interval: {config.BEACON_INTERVAL_S}s ± {config.JITTER_PCT}%")
+
+if config.LOG_LEVEL == 'DEBUG':
+    print("Debug logging enabled")
+```
+
+## Security Best Practices
+
+<AccordionGroup>
+  <Accordion title="Pre-Shared Key Management">
+    - Generate a cryptographically random 32-byte key using `os.urandom(32)`
+    - Never commit `config.py` to version control
+    - Rotate keys periodically
+    - Use different keys for different deployments
+  </Accordion>
+  
+  <Accordion title="Network Configuration">
+    - Use `ALLOWED_HOSTS` to prevent host header attacks
+    - Configure TLS with valid certificates
+    - Use non-standard ports if appropriate for OPSEC
+  </Accordion>
+  
+  <Accordion title="Logging">
+    - Never log sensitive data (keys, passwords, PII)
+    - Rotate logs to prevent disk exhaustion
+    - Secure log files with appropriate permissions
+  </Accordion>
+  
+  <Accordion title="Command Blocking">
+    - Customize `BLOCKED_COMMANDS` for your environment
+    - Consider allowlisting instead of blocklisting for stricter control
+    - Document any changes to security controls
+  </Accordion>
+</AccordionGroup>
+
+## Environment Variables
+
+Some settings can be overridden with environment variables:
+
+| Variable | Purpose | Example |
+|----------|---------|--------|
+| `LAB_MODE` | Enable lab mode | `export LAB_MODE=1` |
+| `BEHIND_NGINX` | Running behind reverse proxy | `export BEHIND_NGINX=1` |
+
+## See Also
+
+- [Cryptography](/api/common/crypto) - Uses `PRE_SHARED_KEY` for key derivation
+- [Logger](/api/common/logger) - Uses logging configuration
+- [Traffic Profile](/api/transport/traffic-profile) - Uses beacon timing and padding settings

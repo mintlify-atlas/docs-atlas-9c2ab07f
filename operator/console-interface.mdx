@@ -1,0 +1,240 @@
+---
+title: Console Interface
+description: Overview of the C2 operator console and available commands
+---
+
+The operator console provides an interactive REPL interface for managing agent sessions and executing tasks. The console is the primary interface for C2 operations.
+
+## Starting the Console
+
+Start the operator console from the server directory:
+
+```bash
+python -m server.api_interface
+```
+
+You'll see the startup banner with server information:
+
+```
+============================================================
+  C2 OPERATOR CONSOLE
+  Server : https://c2.lab.internal:443
+  Active sessions: 3
+============================================================
+```
+
+## Console Prompt
+
+The console uses the `c2>` prompt for all commands:
+
+```
+c2> list
+c2> task a1b2c3d4-e5f6-7890-abcd-ef1234567890 whoami
+c2> results a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+## Available Commands
+
+The console supports six commands:
+
+| Command | Purpose | Usage |
+|---------|---------|-------|
+| `list` | List all sessions | `list` |
+| `task` | Enqueue a task for execution | `task <session_id> <cmd> [args...]` |
+| `results` | View task results for a session | `results <session_id>` |
+| `kill` | Deactivate a session | `kill <session_id>` |
+| `help` | Show available commands | `help` |
+| `exit` | Quit the console | `exit` |
+
+## Command Reference
+
+### list
+
+Displays all registered agent sessions in a formatted table:
+
+```
+c2> list
+
+----------------------------------------------------------------------------------------------------
+SESSION ID                            HOSTNAME          USERNAME          OS                        JITTER    ACTIVE
+----------------------------------------------------------------------------------------------------
+a1b2c3d4-e5f6-7890-abcd-ef1234567890  VICTIM-PC         jdoe              Windows 10 22H2           20%       YES
+b2c3d4e5-f6a7-8901-bcde-f12345678901  UBUNTU-SRV        root              Linux 5.15.0-78-generic   20%       YES
+c3d4e5f6-a7b8-9012-cdef-123456789012  WEB-SERVER        www-data          Linux 6.1.0-13-amd64      20%       NO
+----------------------------------------------------------------------------------------------------
+  3 session(s) total.
+```
+
+The table shows:
+- **SESSION ID**: Unique UUID for each agent
+- **HOSTNAME**: Computer name from agent
+- **USERNAME**: User running the agent
+- **OS**: Operating system information
+- **JITTER**: Beacon jitter percentage (0-100%)
+- **ACTIVE**: Whether the session is active (YES/NO)
+
+### task
+
+Enqueues a command for execution on an agent:
+
+```
+c2> task a1b2c3d4-e5f6-7890-abcd-ef1234567890 whoami
+  Task enqueued — task_id: 9f8e7d6c-5b4a-3210-9876-543210abcdef
+```
+
+With command arguments:
+
+```
+c2> task a1b2c3d4-e5f6-7890-abcd-ef1234567890 ping -n 4 8.8.8.8
+  Task enqueued — task_id: 8e7d6c5b-4a32-1098-7654-3210abcdef12
+```
+
+**Parameters:**
+- `<session_id>`: UUID of the target session (from `list` command)
+- `<cmd>`: Command to execute
+- `[args...]`: Optional command arguments (space-separated)
+
+**Error conditions:**
+```
+c2> task nonexistent-id whoami
+  ERROR: session nonexistent-id not found.
+
+c2> task c3d4e5f6-a7b8-9012-cdef-123456789012 whoami
+  ERROR: session c3d4e5f6-a7b8-9012-cdef-123456789012 is inactive.
+```
+
+### results
+
+Displays all task results for a specific session:
+
+```
+c2> results a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+----------------------------------------------------------------------------------------------------
+TASK ID                               EXIT      DURATION  STDOUT
+----------------------------------------------------------------------------------------------------
+9f8e7d6c-5b4a-3210-9876-543210abcdef  0         42ms      VICTIM-PC\jdoe
+8e7d6c5b-4a32-1098-7654-3210abcdef12  0         156ms     Pinging 8.8.8.8 with 32 bytes of data: Reply from 8.8.8...
+----------------------------------------------------------------------------------------------------
+  2 result(s) total.
+
+  Enter a task_id to view full output, or press Enter to skip:
+```
+
+The results table shows:
+- **TASK ID**: UUID of the task
+- **EXIT**: Exit code (0 = success)
+- **DURATION**: Execution time in milliseconds
+- **STDOUT**: First 60 characters of output
+
+After viewing the table, you can enter a task ID to see full output:
+
+```
+  Enter a task_id to view full output, or press Enter to skip: 8e7d6c5b-4a32-1098-7654-3210abcdef12
+
+  Task ID   : 8e7d6c5b-4a32-1098-7654-3210abcdef12
+  Exit code : 0
+  Duration  : 156ms
+  STDOUT:
+Pinging 8.8.8.8 with 32 bytes of data:
+Reply from 8.8.8.8: bytes=32 time=14ms TTL=118
+Reply from 8.8.8.8: bytes=32 time=13ms TTL=118
+Reply from 8.8.8.8: bytes=32 time=14ms TTL=118
+Reply from 8.8.8.8: bytes=32 time=13ms TTL=118
+
+Ping statistics for 8.8.8.8:
+    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 13ms, Maximum = 14ms, Average = 13ms
+```
+
+### kill
+
+Deactivates an agent session:
+
+```
+c2> kill c3d4e5f6-a7b8-9012-cdef-123456789012
+  Session c3d4e5f6-a7b8-9012-cdef-123456789012 deactivated.
+```
+
+Deactivated sessions:
+- No longer receive new tasks
+- Will not beacon to the server
+- Appear as `ACTIVE: NO` in the session list
+- Remain in the database for historical reference
+
+### help
+
+Displays the command reference:
+
+```
+c2> help
+
+  Commands:
+    list                              — list all sessions
+    task <session_id> <cmd> [args...] — enqueue a task
+    results <session_id>              — show task results
+    kill <session_id>                 — deactivate a session
+    help                              — show this message
+    exit                              — quit
+```
+
+### exit
+
+Quits the operator console:
+
+```
+c2> exit
+  Exiting operator console.
+```
+
+You can also exit with `Ctrl+C` or `Ctrl+D`.
+
+## Console Architecture
+
+The console is implemented in `server/api_interface.py` and provides:
+
+- **Asynchronous REPL**: Non-blocking command execution using `asyncio`
+- **Session management**: Direct integration with `SessionManager`
+- **Task queueing**: Real-time task submission via `CommandQueue`
+- **Database queries**: Direct access to task results and session history
+
+## Session Restoration
+
+On startup, the console automatically restores active sessions from the database:
+
+```python
+await session_mgr.restore_from_db(db)
+```
+
+This ensures that sessions persist across server restarts.
+
+## Error Handling
+
+The console validates all commands and provides clear error messages:
+
+```
+c2> task
+  Usage: task <session_id> <command> [args...]
+
+c2> results
+  Usage: results <session_id>
+
+c2> kill
+  Usage: kill <session_id>
+
+c2> invalid_command
+  Unknown command: invalid_command. Type "help" for usage.
+```
+
+## Implementation Reference
+
+Key functions in `server/api_interface.py`:
+
+- `run_repl()`: Main command loop (line 212)
+- `cmd_list()`: Session listing (line 126)
+- `cmd_task()`: Task enqueueing (line 132)
+- `cmd_results()`: Results display (line 167)
+- `cmd_kill()`: Session deactivation (line 194)
+- `_print_sessions()`: Session table formatter (line 46)
+- `_print_results()`: Results table formatter (line 81)

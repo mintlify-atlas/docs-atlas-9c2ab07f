@@ -1,0 +1,255 @@
+---
+title: 'Padding Strategy'
+description: 'Random padding for message obfuscation'
+---
+
+## Overview
+
+The `padding_strat` module provides functions to add and remove random padding from messages. This helps obscure message sizes and makes traffic analysis more difficult.
+
+Padding is added by prepending a 2-byte length prefix followed by random bytes before the actual plaintext.
+
+**Module:** `evasion.padding_strat`
+
+---
+
+## Functions
+
+### `pad()`
+
+```python
+def pad(plaintext: bytes, min_bytes: int, max_bytes: int) -> bytes
+```
+
+Prepend a 2-byte length prefix and random pad bytes to plaintext.
+
+#### Parameters
+
+<ParamField path="plaintext" type="bytes" required>
+  The original message to be padded
+</ParamField>
+
+<ParamField path="min_bytes" type="int" required>
+  Minimum number of random padding bytes to add
+</ParamField>
+
+<ParamField path="max_bytes" type="int" required>
+  Maximum number of random padding bytes to add
+</ParamField>
+
+#### Returns
+
+<ResponseField name="bytes" type="bytes">
+  Padded message with structure:
+  - **Bytes 0-1**: Big-endian uint16 indicating pad length
+  - **Bytes 2 to (2+pad_len)**: Random padding bytes
+  - **Remaining bytes**: Original plaintext
+</ResponseField>
+
+#### Raises
+
+- `ValueError`: If `min_bytes > max_bytes`
+
+#### Example
+
+```python
+from evasion.padding_strat import pad
+
+# Add 32-128 bytes of random padding
+message = b'Hello, C2 Server!'
+padded = pad(message, 32, 128)
+
+# Structure:
+# [2-byte length][32-128 random bytes][original message]
+print(f"Original size: {len(message)} bytes")
+print(f"Padded size: {len(padded)} bytes")
+
+# No padding (only 2-byte header)
+padded = pad(message, 0, 0)
+print(f"With header only: {len(padded)} bytes")  # 19 bytes (2 + 17)
+```
+
+---
+
+### `strip_padding()`
+
+```python
+def strip_padding(padded: bytes) -> bytes
+```
+
+Remove the padding prepended by `pad()` and return the original plaintext.
+
+#### Parameters
+
+<ParamField path="padded" type="bytes" required>
+  The padded message returned by `pad()`
+</ParamField>
+
+#### Returns
+
+<ResponseField name="bytes" type="bytes">
+  Original plaintext with padding and length prefix removed
+</ResponseField>
+
+#### Raises
+
+- `ValueError`: If input is too short to contain length prefix (< 2 bytes)
+- `ValueError`: If input is shorter than the declared padding length
+
+#### Example
+
+```python
+from evasion.padding_strat import pad, strip_padding
+
+# Round-trip: pad then strip
+original = b'Sensitive data'
+padded = pad(original, 64, 256)
+recovered = strip_padding(padded)
+
+assert recovered == original  # True
+
+# Invalid inputs raise ValueError
+try:
+    strip_padding(b'\x00')  # Too short
+except ValueError as e:
+    print(f"Error: {e}")
+```
+
+---
+
+## Constants
+
+### `HEADER_SIZE`
+
+```python
+HEADER_SIZE = 2
+```
+
+Size of the length prefix in bytes. The prefix is a big-endian unsigned 16-bit integer (`>H` in struct format), which means:
+- Maximum padding length: 65,535 bytes
+- Minimum total padded message size: 2 bytes (header only)
+
+---
+
+## Message Format
+
+Padded messages use the following structure:
+
+```
+┌─────────────┬──────────────────┬─────────────────┐
+│  Length (2) │   Padding (N)    │  Plaintext (M)  │
+└─────────────┴──────────────────┴─────────────────┘
+  Big-endian    Random bytes       Original message
+  uint16 = N    (0-65535 bytes)
+```
+
+### Example Sizes
+
+| Configuration | Padding Length | Total Size |
+|---------------|----------------|------------|
+| `pad(msg, 0, 0)` | 0 bytes | 2 + len(msg) |
+| `pad(msg, 32, 64)` | 32-64 bytes | 34-66 + len(msg) |
+| `pad(msg, 128, 128)` | 128 bytes | 130 + len(msg) |
+
+---
+
+## Usage Patterns
+
+### Basic Padding
+
+```python
+from evasion.padding_strat import pad, strip_padding
+
+# Client side: add padding before encryption
+plaintext = b'{"cmd": "whoami"}'
+padded = pad(plaintext, 64, 128)
+encrypted = encrypt(padded)
+send(encrypted)
+
+# Server side: decrypt then strip padding
+encrypted = receive()
+padded = decrypt(encrypted)
+plaintext = strip_padding(padded)
+process(plaintext)
+```
+
+### Fixed-Size Padding
+
+```python
+# Always add exactly 256 bytes of padding
+padded = pad(message, 256, 256)
+```
+
+### Variable Padding Range
+
+```python
+# Add 0-512 bytes of padding
+padded = pad(message, 0, 512)
+
+# Add 100-200 bytes of padding
+padded = pad(message, 100, 200)
+```
+
+### No Padding (Header Only)
+
+```python
+# Only add 2-byte header, no random padding
+padded = pad(message, 0, 0)
+assert len(padded) == len(message) + 2
+```
+
+---
+
+## Security Considerations
+
+### Randomness Source
+
+Padding bytes are generated using `os.urandom()`, which provides cryptographically secure random bytes from the OS entropy pool.
+
+### Side-Channel Resistance
+
+Padding helps mitigate:
+- **Traffic analysis**: Makes it harder to identify message types by size
+- **Size-based fingerprinting**: Obscures predictable message patterns
+- **Correlation attacks**: Adds noise to request/response size correlations
+
+### Limitations
+
+- Maximum padding: 65,535 bytes (uint16 limit)
+- Overhead: Minimum 2 bytes per message
+- Does not provide encryption or authentication
+
+---
+
+## Error Handling
+
+### Invalid Padding Range
+
+```python
+try:
+    pad(message, 100, 50)  # min > max
+except ValueError as e:
+    print(e)  # "invalid padding range: min_bytes (100) > max_bytes (50)"
+```
+
+### Corrupted Padded Message
+
+```python
+import struct
+
+# Create corrupted message (claims 200 bytes padding but only has 10)
+corrupted = struct.pack('>H', 200) + b'\x00' * 10
+
+try:
+    strip_padding(corrupted)
+except ValueError as e:
+    print(e)  # "strip_padding: input too short — header claims 200 pad bytes..."
+```
+
+---
+
+## Related
+
+- [Header Randomizer](/api/evasion/header-randomizer)
+- [Sleep Strategy](/api/evasion/sleep-strategy)
+- [Beacon Crypto](/api/beacon/crypto)

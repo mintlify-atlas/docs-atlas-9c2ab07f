@@ -1,0 +1,325 @@
+---
+title: Network Configuration
+description: Configure network topology, firewall rules, and DNS for C2 infrastructure
+---
+
+## Lab Environment Overview
+
+The C2 framework is designed for a VirtualBox lab environment with two VMs on a host-only network:
+
+| Host | IP | Role |
+|------|-----|------|
+| Ubuntu VM (c2-server) | 192.168.100.10 | C2 server and Nginx redirector |
+| Windows VM (c2-victim) | 192.168.100.20 | Agent victim machine |
+| Windows Host (dev) | 192.168.100.1 | Development and git operations |
+
+<Warning>
+This is an **isolated lab environment**. Do not deploy this configuration in production or on internet-facing infrastructure without proper security hardening.
+</Warning>
+
+## VirtualBox Network Adapters
+
+### Ubuntu VM (c2-server)
+
+| Adapter | Type | Interface | IP | Purpose |
+|---------|------|-----------|-----|----------|
+| Adapter 1 | NAT | enp0s3 | 10.0.2.15 (DHCP) | Internet access for apt/pip |
+| Adapter 2 | Host-only | enp0s8 | 192.168.100.10/24 (static) | C2 traffic and SSH |
+
+### Windows VM (c2-victim)
+
+| Adapter | Type | IP | Purpose |
+|---------|------|-----|----------|
+| Adapter 1 | NAT | DHCP | Internet access |
+| Adapter 2 | Host-only | 192.168.100.20/24 (static) | C2 traffic |
+
+## Static IP Configuration
+
+### Ubuntu VM Setup
+
+<Steps>
+  <Step title="Disable cloud-init network management">
+    Create the cloud-init override file:
+    ```bash
+    sudo tee /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg > /dev/null <<EOF
+    network: {config: disabled}
+    EOF
+    ```
+  </Step>
+
+  <Step title="Configure netplan">
+    Edit `/etc/netplan/50-cloud-init.yaml`:
+    ```yaml
+    network:
+      version: 2
+      ethernets:
+        enp0s8:
+          addresses:
+            - 192.168.100.10/24
+    ```
+  </Step>
+
+  <Step title="Apply network configuration">
+    ```bash
+    sudo netplan apply
+    ```
+    
+    Verify the interface:
+    ```bash
+    ip addr show enp0s8
+    ```
+  </Step>
+</Steps>
+
+### Windows VM Setup
+
+<Steps>
+  <Step title="Configure static IP">
+    Open Network Adapter settings for the Host-only adapter:
+    - IP address: `192.168.100.20`
+    - Subnet mask: `255.255.255.0`
+    - Gateway: (leave blank)
+    - DNS: (leave blank)
+  </Step>
+
+  <Step title="Add hosts file entry">
+    Edit `C:\Windows\System32\drivers\etc\hosts` as Administrator:
+    ```
+    192.168.100.10    c2.lab.internal
+    ```
+    
+    This allows the agent to resolve the C2 server by hostname.
+  </Step>
+
+  <Step title="Verify connectivity">
+    Test connection to the C2 server:
+    ```cmd
+    ping 192.168.100.10
+    ping c2.lab.internal
+    ```
+  </Step>
+</Steps>
+
+## DNS Resolution
+
+The agent resolves `c2.lab.internal` via the Windows VM hosts file:
+
+```
+C:\Windows\System32\drivers\etc\hosts
+192.168.100.10    c2.lab.internal
+```
+
+<Note>
+In a real deployment, you would use legitimate DNS records or domain fronting. The hosts file approach is only suitable for lab testing.
+</Note>
+
+## Port Layout
+
+### Bare-Metal Deployment
+
+```
+Windows VM (192.168.100.20)
+        |
+        | HTTPS :8443
+        v
+Ubuntu VM (192.168.100.10)
+        |
+        | uvicorn binds 0.0.0.0:8443 (TLS)
+        v
+server/server_main.py
+        |
+        | aiosqlite
+        v
+logs/c2_server.db
+```
+
+### Docker Compose Deployment
+
+```
+Windows VM (192.168.100.20)
+        |
+        | HTTPS :443
+        v
+Ubuntu VM (192.168.100.10)
+        |
+        | Docker host port 443
+        v
+c2-nginx container (nginx:stable-alpine + headers-more)
+        |
+        | HTTP :8443 (Docker internal network: c2-internal)
+        v
+c2-server container (python:3.11-slim)
+        |
+        | aiosqlite
+        v
+logs/c2_server.db (bind mount → host ~/c2-framework/logs/)
+```
+
+## Service Responsibilities
+
+| Component | Port | Protocol | Responsibility |
+|-----------|------|----------|----------------|
+| c2-nginx | 443 (host) | HTTPS | TLS termination, UA filtering, traffic routing |
+| c2-nginx | 80 (host) | HTTP | Redirect to HTTPS |
+| c2-server | 8443 (internal) | HTTP | Beacon handler, session/task management |
+
+<Warning>
+In Docker deployment, port 8443 is **not exposed** to the host network. It is only reachable within the `c2-internal` Docker bridge network. Agents must connect to port 443.
+</Warning>
+
+## Firewall Configuration
+
+### Ubuntu VM (UFW)
+
+<Steps>
+  <Step title="Enable UFW">
+    ```bash
+    sudo ufw enable
+    ```
+  </Step>
+
+  <Step title="Allow SSH from host-only network">
+    ```bash
+    sudo ufw allow from 192.168.100.0/24 to any port 22
+    ```
+  </Step>
+
+  <Step title="Allow HTTPS from host-only network">
+    For Docker deployment:
+    ```bash
+    sudo ufw allow from 192.168.100.0/24 to any port 443
+    sudo ufw allow from 192.168.100.0/24 to any port 80
+    ```
+    
+    For bare-metal deployment:
+    ```bash
+    sudo ufw allow from 192.168.100.0/24 to any port 8443
+    ```
+  </Step>
+
+  <Step title="Verify firewall rules">
+    ```bash
+    sudo ufw status numbered
+    ```
+    
+    Expected output:
+    ```
+    Status: active
+    
+         To                         Action      From
+         --                         ------      ----
+    [1]  22                         ALLOW IN    192.168.100.0/24
+    [2]  443                        ALLOW IN    192.168.100.0/24
+    [3]  80                         ALLOW IN    192.168.100.0/24
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+**Never** allow port 443/8443 from `0.0.0.0/0` in a real deployment. Always restrict to known agent IP ranges or VPN subnets.
+</Warning>
+
+### Windows VM (Windows Firewall)
+
+Windows Firewall typically allows outbound HTTPS by default. No additional configuration is required for the agent to connect to the C2 server.
+
+If connection issues occur:
+
+<Steps>
+  <Step title="Allow outbound HTTPS">
+    Open Windows Defender Firewall → Advanced Settings → Outbound Rules
+    
+    Create a new rule:
+    - Rule Type: Port
+    - Protocol: TCP
+    - Port: 443
+    - Action: Allow the connection
+    - Profile: All
+    - Name: "C2 Agent Outbound"
+  </Step>
+</Steps>
+
+## Network Traffic Flow
+
+### Agent Check-in (Docker Deployment)
+
+1. Agent on Windows VM sends `POST /beacon` to `https://c2.lab.internal:443`
+2. DNS resolves `c2.lab.internal` to `192.168.100.10` via hosts file
+3. TLS handshake with Nginx on port 443
+4. Nginx validates User-Agent and Content-Type headers
+5. If valid, Nginx proxies request to `http://c2-server:8443/beacon` over internal network
+6. C2 server processes beacon and returns task list
+7. Nginx forwards response back to agent
+
+### Traffic Filtering
+
+Nginx performs the following checks before proxying to the backend:
+
+| Check | Requirement | Action on Failure |
+|-------|-------------|-------------------|
+| HTTP Method | Must be POST | Return 404 |
+| User-Agent | Must contain "Mozilla" | Return 404 |
+| Content-Type | Must be "application/octet-stream" | Return 404 |
+| Path | Must be exactly `/beacon` | Return 404 or serve fake site |
+
+<Note>
+Invalid requests **never reach the backend** — they are filtered at the Nginx layer. This prevents fingerprinting of the C2 server.
+</Note>
+
+## Key Network Behaviors
+
+- Agent always connects to port 443 in Docker deployment — never directly to 8443
+- Port 8443 is not exposed to the host network in Docker mode
+- TLS certificate is mounted into both containers from the host `certs/` directory
+- Database and logs persist outside containers via bind mounts to `logs/`
+- `BEHIND_NGINX=1` environment variable tells the server to trust `X-Real-IP` headers
+
+## Testing Network Connectivity
+
+### From Windows VM
+
+Test DNS resolution:
+```cmd
+nslookup c2.lab.internal
+ping c2.lab.internal
+```
+
+Test HTTPS connectivity:
+```cmd
+curl -k -X POST https://c2.lab.internal/beacon ^-H "Content-Type: application/octet-stream" -d "test"
+```
+
+Expected: `400 Bad Request` (backend rejected invalid protocol)
+
+### From Ubuntu VM
+
+Test Nginx is listening:
+```bash
+sudo netstat -tlnp | grep :443
+```
+
+Test backend is reachable:
+```bash
+curl -k --resolve c2.lab.internal:443:127.0.0.1 \
+     -X POST https://c2.lab.internal/beacon \
+     -H 'Content-Type: application/octet-stream' \
+     -d 'test' -w '%{http_code}\n'
+```
+
+Expected: `400`
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `Connection refused` from agent | Firewall blocking port 443 | Check UFW rules on Ubuntu VM |
+| `ping c2.lab.internal` fails | Hosts file not configured | Add entry to Windows VM hosts file |
+| `502 Bad Gateway` | Backend not running | Start c2-server before Nginx |
+| `Name or service not known` | DNS resolution failed | Verify hosts file syntax |
+| Agent can't connect | Wrong IP in hosts file | Confirm `192.168.100.10` matches Ubuntu VM IP |
+
+## Next Steps
+
+- Configure [Docker Deployment](/deployment/docker-deployment) for production-ready stack
+- Set up [Nginx Redirector](/deployment/redirector-setup) for advanced traffic filtering
+- Generate [TLS Certificates](/deployment/tls-certificates) for secure communication

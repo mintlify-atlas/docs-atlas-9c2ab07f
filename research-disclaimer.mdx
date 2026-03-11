@@ -1,0 +1,350 @@
+---
+title: Research Disclaimer
+description: Legal requirements, prohibited uses, and ethical guidelines for the C2 Framework
+---
+
+## Research Notice
+
+<Warning>
+  This framework is developed for **academic and cybersecurity research purposes only**. It is designed to operate exclusively within an isolated lab environment.
+</Warning>
+
+The C2 Framework is an experimental command and control system created to support research in:
+
+- Network traffic analysis and detection methodologies
+- Encrypted protocol analysis and behavioral detection
+- Evasion technique effectiveness evaluation
+- Cybersecurity defense system testing
+
+All use of this software must comply with applicable laws, institutional policies, and ethical research standards.
+
+## Prohibited Uses
+
+The following uses of this framework are **strictly prohibited**:
+
+<CardGroup cols={2}>
+  <Card title="Unauthorized Deployment" icon="ban">
+    **PROHIBITED**: Deployment against any system without explicit written authorization from the system owner
+  </Card>
+  <Card title="Outside Lab Network" icon="network-wired">
+    **PROHIBITED**: Use outside the defined lab network or isolated environment
+  </Card>
+  <Card title="Operational Use" icon="briefcase">
+    **PROHIBITED**: Any operational or commercial use outside of research contexts
+  </Card>
+  <Card title="Malicious Activity" icon="skull-crossbones">
+    **PROHIBITED**: Any use intended to cause harm, disruption, or unauthorized access
+  </Card>
+</CardGroup>
+
+### Detailed Restrictions
+
+<Tabs>
+  <Tab title="Legal Restrictions">
+    **Deployment Restrictions**
+    - May not be deployed on systems without explicit written authorization
+    - May not be used against production infrastructure
+    - May not be used to access systems you do not own or have permission to test
+    - Must comply with Computer Fraud and Abuse Act (CFAA) and equivalent laws in your jurisdiction
+    
+    **Network Restrictions**
+    - Must operate only within isolated lab networks
+    - Must not connect to or communicate with external networks
+    - Must not be deployed on systems connected to the internet
+    - Must not traverse network boundaries outside the lab environment
+    
+    **Penalties**
+    
+    Unauthorized use of this software may violate:
+    - Computer Fraud and Abuse Act (18 U.S.C. § 1030)
+    - Electronic Communications Privacy Act
+    - State and local computer crime laws
+    - International cybercrime laws
+    
+    Violations may result in criminal prosecution, civil liability, and academic sanctions.
+  </Tab>
+  <Tab title="Ethical Guidelines">
+    **Research Ethics**
+    - Obtain IRB approval if research involves human subjects
+    - Document all research activities and maintain audit logs
+    - Follow responsible disclosure practices for any findings
+    - Protect confidentiality of any data collected during research
+    
+    **Academic Integrity**
+    - Cite this framework appropriately in published research
+    - Share findings with the security research community
+    - Report vulnerabilities discovered during research responsibly
+    - Do not use for coursework without instructor approval
+    
+    **Professional Conduct**
+    - Use only for legitimate security research purposes
+    - Maintain isolation boundaries at all times
+    - Document safety controls and risk mitigation measures
+    - Obtain proper authorization before any deployment
+  </Tab>
+  <Tab title="Technical Safeguards">
+    **Enforced Controls**
+    
+    The framework implements mandatory safety controls:
+    
+    ```python
+    # Environment check from agent/environment_checks.py:13-25
+    def _check_lab_mode() -> None:
+        """Exit immediately if LAB_MODE env var is not set to '1'."""
+        value = os.environ.get(config.LAB_MODE_ENV_VAR)
+        if value != config.LAB_MODE_REQUIRED:
+            logger.error(
+                'LAB_MODE invalid — refusing to run outside lab',
+                extra={'check': 'lab_mode', 'value': value}
+            )
+            sys.exit(1)
+    ```
+    
+    **Host Whitelisting**
+    
+    ```python
+    # From common/config_example.py:6-9
+    ALLOWED_HOSTS = [
+        'c2.lab.internal',
+        '192.168.100.10',
+    ]
+    ```
+    
+    **Command Blocklist**
+    
+    Prevents execution of privileged operations:
+    - Registry modifications
+    - Task scheduling
+    - Service control
+    - Network reconnaissance
+    - Privilege enumeration
+    
+    These controls cannot be disabled without modifying source code.
+  </Tab>
+</Tabs>
+
+## Lab Environment Requirements
+
+<Warning>
+  The C2 Framework must only be deployed in environments meeting ALL of the following requirements:
+</Warning>
+
+<Steps>
+  <Step title="Network Isolation">
+    Lab network must be physically or logically isolated from:
+    - Production networks
+    - Corporate networks  
+    - Internet connectivity (except for controlled research scenarios)
+    - Any network containing systems not dedicated to research
+  </Step>
+  <Step title="System Ownership">
+    All systems in the lab environment must be:
+    - Owned by the researcher or research institution
+    - Dedicated to research purposes
+    - Not used for production workloads
+    - Properly configured with LAB_MODE=1 environment variable
+  </Step>
+  <Step title="Authorization">
+    Deployment must have:
+    - Written authorization from institution or system owner
+    - Documented research objectives and methodology
+    - Approval from appropriate oversight bodies (IRB, ethics board, etc.)
+    - Clear termination and cleanup procedures
+  </Step>
+  <Step title="Documentation">
+    Maintain records of:
+    - Lab topology and network configuration
+    - All systems involved in the research
+    - Authorization documentation
+    - Activity logs and research data
+    - Incident response procedures
+  </Step>
+</Steps>
+
+## Liability Disclaimer
+
+<Warning>
+  **The author accepts no liability for misuse of this software.**
+</Warning>
+
+By using this framework, you acknowledge and agree:
+
+### No Warranty
+
+- This software is provided "AS IS" without warranty of any kind
+- The author makes no representations about the suitability, reliability, or accuracy of this software
+- Use is at your own risk
+
+### User Responsibility
+
+- **You are solely responsible** for ensuring your use complies with all applicable laws
+- **You are solely responsible** for obtaining proper authorization before deployment
+- **You are solely responsible** for maintaining proper isolation and safety controls
+- **You are solely responsible** for any consequences of misuse
+
+### Limitation of Liability
+
+- The author shall not be liable for any damages arising from use or misuse of this software
+- This includes direct, indirect, incidental, consequential, or punitive damages
+- The author is not responsible for how this software is used by others
+
+### Indemnification
+
+- You agree to indemnify and hold harmless the author from any claims arising from your use of this software
+- You accept full responsibility for compliance with all applicable laws and regulations
+
+## Responsible Use Guidelines
+
+<Info>
+  Following these guidelines helps ensure ethical and legal research practices.
+</Info>
+
+### Before Deployment
+
+<CardGroup cols={2}>
+  <Card title="1. Obtain Authorization" icon="file-signature">
+    - Get written approval from appropriate authorities
+    - Document the research scope and objectives
+    - Identify all systems and networks involved
+    - Establish clear boundaries and limitations
+  </Card>
+  <Card title="2. Configure Lab Environment" icon="network-wired">
+    - Verify complete network isolation
+    - Set LAB_MODE=1 on all systems
+    - Configure allowed hosts whitelist
+    - Test safety controls and blocklists
+  </Card>
+  <Card title="3. Document Configuration" icon="book">
+    - Record lab topology and IP addresses
+    - Document authentication credentials
+    - Establish logging and monitoring
+    - Create incident response procedures
+  </Card>
+  <Card title="4. Review Compliance" icon="scale-balanced">
+    - Verify compliance with institutional policies
+    - Check applicable laws in your jurisdiction
+    - Obtain IRB approval if required
+    - Review data handling requirements
+  </Card>
+</CardGroup>
+
+### During Research
+
+- **Monitor continuously**: Ensure components remain within lab boundaries
+- **Log all activity**: Maintain detailed records of research activities
+- **Verify isolation**: Regularly check network boundaries and firewall rules
+- **Follow protocols**: Adhere to established research procedures and safety controls
+
+### After Research
+
+- **Cleanup thoroughly**: Remove all framework components from test systems
+- **Document findings**: Record research results and observations
+- **Secure data**: Properly handle and store any collected research data
+- **Report responsibly**: Disclose any security findings through appropriate channels
+
+## Research Ethics Considerations
+
+When conducting research with this framework:
+
+<Tabs>
+  <Tab title="Data Protection">
+    **Minimize Data Collection**
+    - Collect only data necessary for research objectives
+    - Avoid capturing sensitive or personal information
+    - Implement data retention limits
+    - Securely delete data when no longer needed
+    
+    **Secure Storage**
+    - Encrypt research data at rest and in transit
+    - Limit access to authorized researchers only
+    - Maintain audit logs of data access
+    - Follow institutional data handling policies
+  </Tab>
+  <Tab title="Responsible Disclosure">
+    **If You Discover Vulnerabilities**
+    
+    1. **Do not exploit** the vulnerability beyond confirming its existence
+    2. **Document carefully** the nature and impact of the finding
+    3. **Report promptly** to the affected vendor or organization
+    4. **Allow time** for remediation before public disclosure
+    5. **Coordinate** disclosure with security teams
+    
+    **Disclosure Timeline**
+    - Report to vendor immediately upon discovery
+    - Allow 90 days for remediation before public disclosure
+    - Coordinate with vendor on disclosure timeline
+    - Publish findings responsibly after remediation
+  </Tab>
+  <Tab title="Academic Conduct">
+    **Publication Guidelines**
+    - Obtain approval before publishing research results
+    - Anonymize any system or network information
+    - Do not include operational details that could enable misuse
+    - Credit collaborators and cite related work appropriately
+    
+    **Peer Review**
+    - Submit findings to peer-reviewed venues when appropriate
+    - Share defensive measures alongside attack techniques
+    - Contribute to the security research community
+    - Make defensive tools and indicators available
+  </Tab>
+</Tabs>
+
+## Compliance Checklist
+
+Before using this framework, verify you can answer "Yes" to all items:
+
+<Steps>
+  <Step title="Authorization">
+    - [ ] I have written authorization to deploy this framework
+    - [ ] I own or have permission to test all target systems
+    - [ ] My institution has approved this research activity
+    - [ ] I have IRB approval if required for my research
+  </Step>
+  <Step title="Environment">
+    - [ ] Lab network is completely isolated from production networks
+    - [ ] All systems are dedicated research systems
+    - [ ] LAB_MODE=1 is configured on all components
+    - [ ] Firewall rules prevent external communication
+  </Step>
+  <Step title="Safety">
+    - [ ] I understand the prohibited uses and will not violate them
+    - [ ] I have documented incident response procedures
+    - [ ] I can immediately terminate the framework if needed
+    - [ ] I maintain audit logs of all research activities
+  </Step>
+  <Step title="Responsibility">
+    - [ ] I accept full responsibility for my use of this software
+    - [ ] I understand the legal risks of misuse
+    - [ ] I will follow responsible disclosure practices
+    - [ ] I will properly cleanup after research completion
+  </Step>
+</Steps>
+
+<Warning>
+  If you cannot verify ALL items above, **do not proceed** with deployment of this framework.
+</Warning>
+
+## Contact and Reporting
+
+If you:
+- Discover security issues in the framework itself
+- Observe misuse of the framework
+- Have questions about appropriate use
+- Need guidance on research ethics
+
+Contact the project maintainer or your institutional security team immediately.
+
+## Acknowledgment
+
+By using this software, you acknowledge that:
+
+1. You have read and understand this disclaimer
+2. You accept all terms and conditions outlined herein
+3. You agree to use the framework only for legitimate research purposes
+4. You will comply with all applicable laws and ethical guidelines
+5. You accept full responsibility for your use of this software
+
+<Info>
+  This disclaimer is subject to change. Check the repository for the most current version before each use.
+</Info>

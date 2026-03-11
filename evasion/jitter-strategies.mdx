@@ -1,0 +1,353 @@
+---
+title: 'Beacon Jitter Strategies'
+description: 'Timing randomization algorithms to evade beacon detection'
+---
+
+## Overview
+
+Jitter strategies introduce controlled randomness into beacon check-in intervals to prevent detection systems from identifying predictable communication patterns. The framework implements two jitter algorithms with configurable variance levels.
+
+## Why Jitter Matters
+
+Network monitoring systems often detect C2 beacons by identifying **fixed-interval traffic patterns**:
+
+<CodeGroup>
+```text Predictable (Detectable)
+Beacon Check-ins:
+00:00  00:30  01:00  01:30  02:00  02:30
+   └─30s─┘└─30s─┘└─30s─┘└─30s─┘└─30s─┘
+
+⚠️ Perfectly regular intervals trigger alerts
+```
+
+```text Jittered (Evasive)
+Beacon Check-ins:
+00:00  00:27  00:55  01:28  02:03  02:29
+   └─27s─┘└─28s─┘└─33s─┘└─35s─┘└─26s─┘
+
+✓ Irregular timing appears more natural
+```
+</CodeGroup>
+
+<Note>
+  Jitter is applied **per beacon interval**, not as a one-time offset. Each check-in calculates a new randomized sleep duration.
+</Note>
+
+## Jitter Strategies
+
+The framework provides two probability distributions for sleep interval randomization:
+
+### 1. Uniform Jitter
+
+**Algorithm**: Flat random distribution within ±jitter_pct of base interval
+
+```python
+# Source: evasion/sleep_strat.py:8-13
+def uniform_sleep(base_s: float, jitter_pct: int) -> float:
+    if jitter_pct == 0:
+        return float(base_s)
+    delta = base_s * (jitter_pct / 100.0)
+    return max(MIN_SLEEP_S, random.uniform(base_s - delta, base_s + delta))
+```
+
+**Characteristics**:
+- Equal probability for any value within the range
+- Simple, predictable variance bounds
+- Suitable for most operational scenarios
+
+**Example** (base=30s, jitter=20%):
+```python
+>>> for _ in range(5):
+...     print(f"{uniform_sleep(30.0, 20):.1f}s")
+27.3s
+32.1s
+25.8s
+31.4s
+28.9s
+```
+
+**Distribution**:
+```
+Probability
+    |
+0.05|     ┌─────────────────┐
+    |     │                 │
+    |     │                 │
+    |─────┘                 └─────
+    +─────+─────+─────+─────+─────> Sleep Duration
+         24s   27s   30s   33s   36s
+              (base ± 20%)
+```
+
+### 2. Gaussian Jitter
+
+**Algorithm**: Bell-curve distribution centered on base interval
+
+```python
+# Source: evasion/sleep_strat.py:16-21
+def gaussian_sleep(base_s: float, jitter_pct: int) -> float:
+    if jitter_pct == 0:
+        return float(base_s)
+    sigma = base_s * (jitter_pct / 100.0)
+    return max(MIN_SLEEP_S, random.gauss(base_s, sigma))
+```
+
+**Characteristics**:
+- Most values cluster near base interval
+- Occasional outliers create realistic variance
+- Mimics human behavior patterns better
+- Recommended for high-security environments
+
+**Example** (base=30s, jitter=40%):
+```python
+>>> for _ in range(5):
+...     print(f"{gaussian_sleep(30.0, 40):.1f}s")
+29.2s
+34.7s
+28.1s
+31.8s
+25.3s
+```
+
+**Distribution**:
+```
+Probability
+    |
+0.05|         ╱─╲
+    |       ╱─   ─╲
+    |     ╱─       ─╲
+    |───╱─           ─╲───
+    +─────+─────+─────+─────+─────> Sleep Duration
+         18s   24s   30s   36s   42s
+           (center = base, σ = 40%)
+```
+
+## Sleep Floor Constraint
+
+All jitter strategies enforce a minimum sleep duration:
+
+```python
+MIN_SLEEP_S = 1.0  # Prevents zero or negative intervals
+```
+
+This ensures beacons never sleep for less than 1 second, even with extreme jitter settings.
+
+```python
+# Example: Low base interval with high jitter
+>>> gaussian_sleep(2.0, 80)  # Could theoretically go negative
+1.0  # Clamped to MIN_SLEEP_S
+```
+
+## Strategy Selection
+
+Choose based on your operational profile:
+
+<Tabs>
+  <Tab title="Uniform - General Use">
+    **Best for**:
+    - Standard operations
+    - Predictable variance bounds needed
+    - Lower to medium evasion profiles
+    
+    **Profiles using uniform**:
+    - `baseline` (0% jitter)
+    - `low` (10% jitter)
+    - `medium` (20% jitter)
+    
+    ```yaml
+    profiles:
+      medium:
+        jitter_pct: 20
+        strategy: uniform  # ±20% flat distribution
+    ```
+  </Tab>
+  
+  <Tab title="Gaussian - High Security">
+    **Best for**:
+    - High-security environments
+    - Advanced behavioral detection systems
+    - Long-term persistence operations
+    
+    **Profiles using gaussian**:
+    - `high` (40% jitter)
+    
+    ```yaml
+    profiles:
+      high:
+        jitter_pct: 40
+        strategy: gaussian  # Bell curve, σ=40%
+    ```
+    
+    <Note>
+      Gaussian jitter produces more natural timing patterns that better mimic human-driven traffic, making behavioral analysis more difficult.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Implementation Details
+
+### Strategy Resolution
+
+The framework resolves strategy names to callable functions:
+
+```python
+# Source: evasion/sleep_strat.py:24-33
+def get_sleep_fn(strategy: str) -> Callable:
+    if strategy == 'uniform':
+        return uniform_sleep
+    if strategy == 'gaussian':
+        return gaussian_sleep
+    raise ValueError(
+        f'unknown jitter strategy "{strategy}". '
+        f'Valid strategies: uniform, gaussian'
+    )
+```
+
+### Usage in Beacon Loop
+
+```python
+from evasion.sleep_strat import get_sleep_fn
+from transport.traffic_profile import load_active_profile
+import time
+
+# Load profile and get sleep function
+profile = load_active_profile()
+sleep_fn = get_sleep_fn(profile.jitter_strategy)
+
+BEACON_INTERVAL_S = 30.0
+
+while True:
+    # Send beacon
+    send_beacon()
+    
+    # Calculate jittered sleep duration
+    sleep_duration = sleep_fn(BEACON_INTERVAL_S, profile.jitter_pct)
+    
+    print(f"Sleeping for {sleep_duration:.2f}s")
+    time.sleep(sleep_duration)
+```
+
+## Jitter Percentage Guidelines
+
+<CardGroup cols={2}>
+  <Card title="0% - No Jitter" icon="pause">
+    **Effect**: Fixed interval (base_s)
+    
+    **Use Case**: Testing only
+    
+    **Detection Risk**: ⚠️ High
+  </Card>
+  
+  <Card title="10% - Light Jitter" icon="wave-pulse">
+    **Effect**: ±3s variance (30s base)
+    
+    **Use Case**: Low-risk networks
+    
+    **Detection Risk**: ⚠️ Medium
+  </Card>
+  
+  <Card title="20% - Moderate Jitter" icon="wave-pulse">
+    **Effect**: ±6s variance (30s base)
+    
+    **Use Case**: Standard operations
+    
+    **Detection Risk**: ⚠️ Low-Medium
+  </Card>
+  
+  <Card title="40% - Aggressive Jitter" icon="wave-pulse">
+    **Effect**: ±12s variance (30s base)
+    
+    **Use Case**: High-security environments
+    
+    **Detection Risk**: ✓ Low
+  </Card>
+</CardGroup>
+
+## Statistical Analysis
+
+### Variance Testing
+
+The implementation includes statistical validation:
+
+```python
+# Source: evasion/sleep_strat.py:59-65
+results = [gaussian_sleep(BASE_S, 40) for _ in range(20)]
+variance = sum((r - BASE_S) ** 2 for r in results) / 20
+assert variance > 1.0, "high profile should show clear variance"
+```
+
+### Range Verification
+
+Uniform jitter enforces strict bounds:
+
+```python
+# For 20% jitter on 30s base:
+for _ in range(100):
+    r = uniform_sleep(30.0, 20)
+    assert 24.0 <= r <= 36.0 or r == MIN_SLEEP_S
+```
+
+## Operational Considerations
+
+<Warning>
+  **Long-Term Operations**: Even with jitter, extremely long-running beacons may eventually reveal patterns. Consider implementing additional evasion layers like traffic profiles and header randomization.
+</Warning>
+
+### Combining with Other Evasion
+
+Jitter works best when combined with:
+
+1. **Traffic Padding**: Obscures message size patterns
+2. **Header Randomization**: Prevents User-Agent fingerprinting
+3. **Domain Fronting**: Routes traffic through legitimate CDNs
+
+### Performance Impact
+
+- **CPU**: Negligible (simple random number generation)
+- **Memory**: None (stateless calculation)
+- **Network**: Indirect (longer intervals = fewer requests)
+
+## Example Configurations
+
+<CodeGroup>
+```python Low-Risk Network
+profile = load_profile('low')
+# jitter_pct: 10
+# strategy: uniform
+
+# 30s base → 27-33s actual range
+sleep_duration = uniform_sleep(30.0, 10)
+```
+
+```python Corporate Environment
+profile = load_profile('medium')
+# jitter_pct: 20
+# strategy: uniform
+
+# 30s base → 24-36s actual range
+sleep_duration = uniform_sleep(30.0, 20)
+```
+
+```python High-Security Environment
+profile = load_profile('high')
+# jitter_pct: 40
+# strategy: gaussian
+
+# 30s base → bell curve centered at 30s, σ=12s
+sleep_duration = gaussian_sleep(30.0, 40)
+```
+</CodeGroup>
+
+## Related Topics
+
+<CardGroup cols={3}>
+  <Card title="Traffic Profiles" icon="sliders" href="/evasion/traffic-profiles">
+    Configure jitter in profile YAML
+  </Card>
+  <Card title="Traffic Padding" icon="shuffle" href="/evasion/traffic-padding">
+    Combine with size obfuscation
+  </Card>
+  <Card title="Evasion Overview" icon="shield" href="/evasion/overview">
+    Complete evasion architecture
+  </Card>
+</CardGroup>

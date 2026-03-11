@@ -1,0 +1,373 @@
+---
+title: 'Sleep Strategy'
+description: 'Configurable sleep intervals with jitter for timing evasion'
+---
+
+## Overview
+
+The `sleep_strat` module provides sleep interval calculation with configurable jitter strategies. This helps beacons evade detection by varying their callback timing patterns.
+
+Two jitter strategies are available:
+- **Uniform**: Evenly distributed random jitter
+- **Gaussian**: Bell-curve distributed jitter (more natural)
+
+**Module:** `evasion.sleep_strat`
+
+---
+
+## Functions
+
+### `get_sleep_fn()`
+
+```python
+def get_sleep_fn(strategy: str) -> Callable
+```
+
+Return the sleep function matching the given strategy name.
+
+#### Parameters
+
+<ParamField path="strategy" type="str" required>
+  Jitter strategy name:
+  - `"uniform"`: Uniform random distribution
+  - `"gaussian"`: Gaussian (normal) distribution
+</ParamField>
+
+#### Returns
+
+<ResponseField name="Callable" type="Callable[[float, int], float]">
+  Sleep function with signature `(base_s: float, jitter_pct: int) -> float`
+</ResponseField>
+
+#### Raises
+
+- `ValueError`: If strategy is not "uniform" or "gaussian"
+
+#### Example
+
+```python
+from evasion.sleep_strat import get_sleep_fn
+import time
+
+# Get uniform jitter function
+sleep_fn = get_sleep_fn('uniform')
+
+# Calculate sleep duration with 20% jitter
+base_interval = 30.0  # 30 seconds
+jitter = 20  # 20%
+duration = sleep_fn(base_interval, jitter)
+
+# Sleep for calculated duration
+time.sleep(duration)
+
+# Get gaussian jitter function
+sleep_fn = get_sleep_fn('gaussian')
+duration = sleep_fn(base_interval, jitter)
+time.sleep(duration)
+```
+
+---
+
+### `uniform_sleep()`
+
+```python
+def uniform_sleep(base_s: float, jitter_pct: int) -> float
+```
+
+Return a sleep duration using uniform random jitter within +/- `jitter_pct` of base.
+
+#### Parameters
+
+<ParamField path="base_s" type="float" required>
+  Base sleep duration in seconds
+</ParamField>
+
+<ParamField path="jitter_pct" type="int" required>
+  Jitter percentage (0-100). Applied as +/- range around base.
+</ParamField>
+
+#### Returns
+
+<ResponseField name="float" type="float">
+  Sleep duration in seconds, uniformly distributed in range:
+  - Minimum: `base_s * (1 - jitter_pct/100)` or `MIN_SLEEP_S`, whichever is greater
+  - Maximum: `base_s * (1 + jitter_pct/100)`
+</ResponseField>
+
+#### Example
+
+```python
+from evasion.sleep_strat import uniform_sleep
+
+# 30 second base with 20% jitter
+# Result will be uniformly distributed between 24-36 seconds
+duration = uniform_sleep(30.0, 20)
+print(f"Sleep for {duration:.2f} seconds")
+
+# No jitter
+duration = uniform_sleep(30.0, 0)
+print(f"Sleep for {duration:.2f} seconds")  # Always 30.00
+
+# 50% jitter (wide range)
+duration = uniform_sleep(60.0, 50)
+print(f"Sleep for {duration:.2f} seconds")  # Between 30-90 seconds
+```
+
+---
+
+### `gaussian_sleep()`
+
+```python
+def gaussian_sleep(base_s: float, jitter_pct: int) -> float
+```
+
+Return a sleep duration using Gaussian jitter with standard deviation derived from `jitter_pct`.
+
+#### Parameters
+
+<ParamField path="base_s" type="float" required>
+  Base sleep duration in seconds (mean of distribution)
+</ParamField>
+
+<ParamField path="jitter_pct" type="int" required>
+  Jitter percentage (0-100). Converted to standard deviation: `sigma = base_s * (jitter_pct / 100)`
+</ParamField>
+
+#### Returns
+
+<ResponseField name="float" type="float">
+  Sleep duration in seconds, normally distributed around `base_s` with standard deviation `sigma`. Result is clamped to `MIN_SLEEP_S` minimum.
+</ResponseField>
+
+#### Example
+
+```python
+from evasion.sleep_strat import gaussian_sleep
+
+# 30 second base with 20% jitter
+# Standard deviation = 6 seconds
+# ~68% of results will be within 24-36 seconds
+# ~95% of results will be within 18-42 seconds
+duration = gaussian_sleep(30.0, 20)
+print(f"Sleep for {duration:.2f} seconds")
+
+# More natural-looking timing variation
+for i in range(5):
+    duration = gaussian_sleep(45.0, 30)
+    print(f"Beacon {i+1}: {duration:.2f}s")
+```
+
+---
+
+## Constants
+
+### `MIN_SLEEP_S`
+
+```python
+MIN_SLEEP_S = 1.0
+```
+
+Minimum sleep duration in seconds. All sleep functions clamp their return values to this floor to prevent zero or negative sleep intervals.
+
+---
+
+## Jitter Strategies
+
+### Uniform Distribution
+
+**Characteristics:**
+- Evenly distributed across the entire range
+- All values within range are equally likely
+- Predictable minimum and maximum bounds
+
+**Use Cases:**
+- When you need guaranteed min/max bounds
+- Testing with predictable ranges
+- Environments where extreme values are acceptable
+
+**Distribution Example (base=30s, jitter=20%):**
+
+```
+Probability
+    │
+    │ ┌────────────────────────┐
+    │ │                        │
+    │ │                        │
+    └─┴────────────────────────┴───► Time
+     24s                      36s
+```
+
+### Gaussian Distribution
+
+**Characteristics:**
+- Bell curve centered on base duration
+- Most values cluster near the base
+- Occasional outliers (rare but possible)
+- More natural-looking timing patterns
+
+**Use Cases:**
+- Mimicking human behavior
+- More realistic beacon timing
+- When you want occasional variation without constant extremes
+
+**Distribution Example (base=30s, jitter=20%):**
+
+```
+Probability
+    │     ╱‾‾‾╲
+    │   ╱       ╲
+    │ ╱           ╲
+    │╱             ╲___
+    └────────────────────────► Time
+        24s  30s  36s
+```
+
+---
+
+## Usage Patterns
+
+### Basic Beacon Loop
+
+```python
+from evasion.sleep_strat import get_sleep_fn
+import time
+
+# Configure jitter strategy
+sleep_fn = get_sleep_fn('gaussian')
+BASE_INTERVAL = 30.0
+JITTER_PCT = 20
+
+while True:
+    # Perform beacon callback
+    beacon()
+    
+    # Sleep with jitter
+    duration = sleep_fn(BASE_INTERVAL, JITTER_PCT)
+    time.sleep(duration)
+```
+
+### Profile-Based Configuration
+
+```python
+from evasion.sleep_strat import get_sleep_fn
+
+PROFILES = {
+    'stealth': {
+        'strategy': 'gaussian',
+        'base': 120.0,  # 2 minutes
+        'jitter': 40,    # 40% variance
+    },
+    'fast': {
+        'strategy': 'uniform',
+        'base': 10.0,   # 10 seconds
+        'jitter': 10,    # 10% variance
+    },
+    'deterministic': {
+        'strategy': 'uniform',
+        'base': 30.0,
+        'jitter': 0,     # No jitter
+    },
+}
+
+def get_sleep_duration(profile_name: str) -> float:
+    profile = PROFILES[profile_name]
+    sleep_fn = get_sleep_fn(profile['strategy'])
+    return sleep_fn(profile['base'], profile['jitter'])
+
+# Use stealth profile
+duration = get_sleep_duration('stealth')
+time.sleep(duration)
+```
+
+### Dynamic Jitter Adjustment
+
+```python
+from evasion.sleep_strat import gaussian_sleep
+import time
+
+BASE_INTERVAL = 30.0
+
+# Start with low jitter
+jitter = 10
+
+while True:
+    beacon()
+    
+    # Increase jitter if detection risk rises
+    if detect_risk_high():
+        jitter = min(50, jitter + 10)
+    else:
+        jitter = max(10, jitter - 5)
+    
+    duration = gaussian_sleep(BASE_INTERVAL, jitter)
+    time.sleep(duration)
+```
+
+---
+
+## Statistical Properties
+
+### Uniform Distribution
+
+- **Mean**: `base_s`
+- **Range**: `[base_s * (1 - jitter_pct/100), base_s * (1 + jitter_pct/100)]`
+- **Standard Deviation**: `base_s * jitter_pct / 100 / sqrt(3)` ≈ `base_s * jitter_pct * 0.577 / 100`
+
+### Gaussian Distribution
+
+- **Mean**: `base_s`
+- **Standard Deviation**: `base_s * jitter_pct / 100`
+- **68% within**: `base_s ± 1σ`
+- **95% within**: `base_s ± 2σ`
+- **99.7% within**: `base_s ± 3σ`
+
+---
+
+## Comparison Table
+
+| Feature | Uniform | Gaussian |
+|---------|---------|----------|
+| Distribution | Flat | Bell curve |
+| Predictability | Medium | Low |
+| Natural appearance | Low | High |
+| Outliers | None | Rare |
+| Min/Max guarantees | Yes | No (clamped at `MIN_SLEEP_S`) |
+| Best for | Testing, fixed bounds | Production, stealth |
+
+---
+
+## Error Handling
+
+### Invalid Strategy
+
+```python
+from evasion.sleep_strat import get_sleep_fn
+
+try:
+    sleep_fn = get_sleep_fn('exponential')
+except ValueError as e:
+    print(e)  # 'unknown jitter strategy "exponential". Valid strategies: uniform, gaussian'
+```
+
+### Handling Low Base Intervals
+
+```python
+from evasion.sleep_strat import uniform_sleep
+
+# Very low base with high jitter might hit MIN_SLEEP_S floor
+base = 2.0
+jitter = 60  # ±60%
+
+duration = uniform_sleep(base, jitter)
+# Requested range: 0.8s - 3.2s
+# Actual result: 1.0s - 3.2s (clamped to MIN_SLEEP_S)
+print(f"Duration: {duration:.2f}s")
+```
+
+---
+
+## Related
+
+- [Header Randomizer](/api/evasion/header-randomizer)
+- [Padding Strategy](/api/evasion/padding-strategy)
+- [Beacon Client](/api/beacon/client)

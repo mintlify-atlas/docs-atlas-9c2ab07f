@@ -1,0 +1,220 @@
+---
+title: 'Evasion Techniques Overview'
+description: 'Comprehensive evasion capabilities for stealth operations'
+---
+
+## Overview
+
+The C2 Framework provides a layered evasion system designed to reduce the detectability of beacon traffic and avoid network monitoring, behavioral analysis, and signature-based detection systems.
+
+Evasion techniques work together across three dimensions:
+
+<CardGroup cols={3}>
+  <Card title="Temporal Evasion" icon="clock" href="/evasion/jitter-strategies">
+    Beacon timing randomization using jitter strategies
+  </Card>
+  <Card title="Traffic Obfuscation" icon="shuffle" href="/evasion/traffic-padding">
+    Payload size randomization through padding
+  </Card>
+  <Card title="Header Polymorphism" icon="fingerprint" href="/evasion/header-randomization">
+    HTTP header randomization and rotation
+  </Card>
+</CardGroup>
+
+## Evasion Architecture
+
+All evasion features are controlled through a unified **traffic profile** system that allows operators to select pre-configured evasion levels or create custom profiles.
+
+```python
+# Source: evasion/profile_config.yaml
+active_profile: medium
+
+profiles:
+  baseline:   # No evasion - fixed timing, no padding, static headers
+  low:        # Light evasion - 10% jitter, light padding, UA rotation
+  medium:     # Moderate evasion - 20% jitter, medium padding, multi-header rotation
+  high:       # Aggressive evasion - 40% gaussian jitter, heavy padding, full randomization
+```
+
+<Note>
+  **Profile Selection Trade-offs**: Higher evasion levels provide better stealth but increase bandwidth usage and may introduce timing delays. Select profiles based on your operational security requirements and network environment.
+</Note>
+
+## Evasion Components
+
+### 1. Jitter Strategies
+
+Control beacon timing randomization to avoid predictable check-in patterns.
+
+- **Uniform Jitter**: Flat random distribution within ±jitter_pct of base interval
+- **Gaussian Jitter**: Bell-curve distribution for more natural timing variance
+
+Implemented in: `evasion/sleep_strat.py:8-33`
+
+### 2. Traffic Padding
+
+Add random bytes to beacon payloads to obscure actual message sizes and defeat size-based fingerprinting.
+
+- **Dynamic Padding**: Random padding between min/max thresholds per request
+- **Length Prefix Protocol**: 2-byte header encodes padding length for strip operation
+- **Cryptographic Randomness**: Uses `os.urandom()` for unpredictable pad bytes
+
+Implemented in: `evasion/padding_strat.py:8-40`
+
+### 3. Header Randomization
+
+Rotate and randomize HTTP headers across four levels:
+
+| Level | User-Agent | Accept-Language | Accept-Encoding | Header Order |
+|-------|-----------|----------------|----------------|-------------|
+| **0** | Fixed Chrome | Fixed en-US | Fixed gzip | Fixed |
+| **1** | Rotated | Fixed en-US | Fixed gzip | Fixed |
+| **2** | Rotated | Rotated | Fixed gzip | Fixed |
+| **3** | Rotated | Rotated | Rotated | Shuffled |
+
+Implemented in: `evasion/header_randomizer.py:32-76`
+
+## Traffic Profiles
+
+The framework includes four pre-configured profiles:
+
+<AccordionGroup>
+  <Accordion title="baseline - No Evasion">
+    ```yaml
+    jitter_pct:   0        # No timing variance
+    strategy:     uniform
+    padding_min:  0        # No padding
+    padding_max:  0
+    header_level: 0        # Fixed headers
+    ```
+    
+    **Use Case**: Testing, controlled environments, maximum performance
+  </Accordion>
+
+  <Accordion title="low - Light Evasion">
+    ```yaml
+    jitter_pct:   10       # ±10% timing variance
+    strategy:     uniform
+    padding_min:  0
+    padding_max:  64       # Up to 64 bytes padding
+    header_level: 1        # User-Agent rotation
+    ```
+    
+    **Use Case**: Minimal stealth requirements, bandwidth-constrained environments
+  </Accordion>
+
+  <Accordion title="medium - Moderate Evasion (Default)">
+    ```yaml
+    jitter_pct:   20       # ±20% timing variance
+    strategy:     uniform
+    padding_min:  0
+    padding_max:  128      # Up to 128 bytes padding
+    header_level: 2        # UA + Accept-Language rotation
+    ```
+    
+    **Use Case**: Standard operations, balanced stealth and performance
+  </Accordion>
+
+  <Accordion title="high - Aggressive Evasion">
+    ```yaml
+    jitter_pct:   40       # ±40% timing variance
+    strategy:     gaussian # Natural bell-curve distribution
+    padding_min:  64       # Minimum 64 bytes padding
+    padding_max:  256      # Up to 256 bytes padding
+    header_level: 3        # Full header randomization + shuffling
+    ```
+    
+    **Use Case**: High-security environments, advanced threat detection present
+  </Accordion>
+</AccordionGroup>
+
+## Loading Profiles
+
+Profiles are loaded at beacon initialization from `evasion/profile_config.yaml`:
+
+```python
+from transport.traffic_profile import load_active_profile, load_profile
+
+# Load the active profile (defined in YAML)
+profile = load_active_profile()
+
+# Or load a specific profile by name
+profile = load_profile('high')
+
+print(f"Using profile: {profile.name}")
+print(f"Jitter: {profile.jitter_pct}% ({profile.jitter_strategy})")
+print(f"Padding: {profile.padding_min}-{profile.padding_max} bytes")
+print(f"Header level: {profile.header_level}")
+```
+
+See: `transport/traffic_profile.py:72-110`
+
+## Detection Avoidance
+
+Each evasion technique targets specific detection methods:
+
+<CardGroup cols={2}>
+  <Card title="Timing Analysis" icon="wave-pulse">
+    **Threat**: Predictable beacon intervals detected by NetFlow analysis
+    
+    **Mitigation**: Jitter strategies break fixed timing patterns
+  </Card>
+  
+  <Card title="Size Fingerprinting" icon="ruler">
+    **Threat**: Consistent payload sizes create detectable signatures
+    
+    **Mitigation**: Random padding obscures actual message lengths
+  </Card>
+  
+  <Card title="Header Signatures" icon="fingerprint">
+    **Threat**: Static User-Agent or header combinations flagged by IDS
+    
+    **Mitigation**: Header randomization mimics diverse legitimate traffic
+  </Card>
+  
+  <Card title="Behavioral Analysis" icon="magnifying-glass-chart">
+    **Threat**: ML-based detection identifies non-human traffic patterns
+    
+    **Mitigation**: Gaussian jitter + header shuffling mimics organic browsing
+  </Card>
+</CardGroup>
+
+## Operational Security Guidelines
+
+<Warning>
+  **Profile Selection**: Changing profiles mid-operation may create detectable pattern shifts. Select the appropriate profile before deployment and maintain it throughout the operation.
+</Warning>
+
+### Recommended Profile Selection
+
+1. **Low-Risk Environments** → `low` or `medium` profile
+   - Corporate networks with basic monitoring
+   - Bandwidth-sensitive operations
+   - Long-term persistence scenarios
+
+2. **High-Risk Environments** → `high` profile
+   - Government/military networks
+   - Financial institutions
+   - Environments with advanced EDR/NDR solutions
+
+3. **Testing/Development** → `baseline` profile
+   - Local testing
+   - Performance benchmarking
+   - Debugging beacon communication
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Jitter Strategies" icon="clock" href="/evasion/jitter-strategies">
+    Deep dive into timing randomization algorithms
+  </Card>
+  <Card title="Traffic Padding" icon="shuffle" href="/evasion/traffic-padding">
+    Learn payload padding implementation details
+  </Card>
+  <Card title="Header Randomization" icon="fingerprint" href="/evasion/header-randomization">
+    Understand HTTP header polymorphism
+  </Card>
+  <Card title="Traffic Profiles" icon="sliders" href="/evasion/traffic-profiles">
+    Configure custom evasion profiles
+  </Card>
+</CardGroup>

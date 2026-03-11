@@ -1,0 +1,413 @@
+---
+title: Redirector Setup
+description: Configure Nginx as a reverse proxy for traffic filtering and operational security
+---
+
+## Overview
+
+The Nginx redirector provides a critical layer of operational security by:
+
+- Performing TLS termination to hide backend server fingerprints
+- Filtering traffic based on User-Agent, Content-Type, and HTTP method
+- Serving a fake website for non-beacon requests
+- Spoofing the `Server` header to impersonate Apache
+- Logging all access attempts for incident response
+
+<Warning>
+The redirector is **essential for OPSEC**. Running the C2 server without Nginx exposes it to fingerprinting and allows blue teams to identify the framework by HTTP response patterns.
+</Warning>
+
+## Deployment Methods
+
+Two deployment methods are supported:
+
+| Method | Use Case | Configuration |
+|--------|----------|---------------|
+| **Docker Compose** (recommended) | Reproducible deployment | nginx_docker.conf, automatic environment |
+| **Bare-Metal** | Direct control | nginx_example.conf, manual systemd setup |
+
+This guide focuses on **Docker Compose** deployment. For bare-metal, see the [deployment guide](https://github.com/your-repo/c2-framework/blob/main/redirector/deployment_guide.md).
+
+## Nginx Configuration Files
+
+The redirector uses two Nginx configuration files:
+
+### nginx_main.conf
+
+Loads the `headers-more` module required for Server header spoofing:
+
+```nginx
+load_module modules/ngx_http_headers_more_filter_module.so;
+
+user  nginx;
+worker_processes  auto;
+
+error_log  /var/log/nginx/error.log notice;
+pid        /var/run/nginx.pid;
+
+events {
+    worker_connections  1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+    sendfile      on;
+    keepalive_timeout  65;
+    include /etc/nginx/conf.d/*.conf;
+}
+```
+
+### nginx_docker.conf
+
+Defines the C2 server virtual host and traffic filtering rules:
+
+```nginx
+log_format c2_access '$remote_addr "$request" "$http_user_agent" '
+                     'req=$request_length status=$status';
+
+server {
+    listen 443 ssl;
+    server_name c2.lab.internal;
+
+    access_log /var/log/nginx/c2_access.log c2_access;
+    error_log  /var/log/nginx/c2_error.log warn;
+
+    # Hide nginx version
+    server_tokens off;
+
+    # TLS — same cert and key used by the backend server
+    ssl_certificate     /etc/nginx/certs/server.crt;
+    ssl_certificate_key /etc/nginx/certs/server.key;
+
+    # Enforce modern TLS only
+    ssl_protocols             TLSv1.2 TLSv1.3;
+    ssl_ciphers               HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    # Suppress nginx Server header and replace with Apache
+    more_clear_headers Server;
+    more_set_headers 'Server: Apache/2.4.54';
+
+    # HSTS - force HTTPS to prevent downgrade attacks
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # Block directory traversal attempts
+    if ($request_uri ~ "\.\.") {
+        return 403;
+    }
+
+    # Block common shell metadata paths
+    if ($request_uri ~ "(wp-login\.php|wp-admin|admin\.php|login\.php)") {
+        return 403;
+    }
+
+    # Forward beacon traffic to backend server
+    location = /beacon {
+        # Only POST is valid — reject everything else at this location
+        limit_except POST {
+            deny all;
+        }
+
+        if ($http_user_agent !~* "Mozilla") {
+            return 404;
+        }
+
+        if ($content_type != "application/octet-stream") {
+            return 404;
+        }
+
+        proxy_pass         http://c2-server:8443/beacon;
+        proxy_http_version 1.1;
+
+        # Pass real client IP so server logs show agent IP not 127.0.0.1
+        proxy_set_header   X-Real-IP        $remote_addr;
+        proxy_set_header   X-Forwarded-For  $proxy_add_x_forwarded_for;
+        proxy_set_header   Host             $host;
+
+        # Forward raw binary payload without buffering or modification
+        proxy_request_buffering  off;
+        proxy_buffering          off;
+
+        # Match agent request timeout
+        proxy_connect_timeout    10s;
+        proxy_send_timeout       10s;
+        proxy_read_timeout       10s;
+
+        # Pass large payloads — must match MAX_BEACON_SIZE in server_main.py
+        client_max_body_size 256k;
+    }
+
+    # Return fake normal website for all other paths 
+    location / {
+        root /var/www/html;
+        index index.html;
+    }
+}
+
+# Redirect plain HTTP to HTTPS
+server {
+    listen 80;
+    server_name c2.lab.internal;
+    return 301 https://$host$request_uri;
+}
+```
+
+## Traffic Filtering Rules
+
+### Beacon Endpoint (`/beacon`)
+
+The `/beacon` endpoint enforces strict validation:
+
+| Check | Rule | Action on Failure |
+|-------|------|-------------------|
+| HTTP Method | Must be `POST` | `404` |
+| User-Agent | Must contain "Mozilla" | `404` |
+| Content-Type | Must be "application/octet-stream" | `404` |
+| Path | Must be exactly `/beacon` | `404` or serve fake site |
+
+<Note>
+The agent's User-Agent is set to `Mozilla/5.0` to pass the filter. See `transport/beacon_transport.py:47` for implementation.
+</Note>
+
+### Blocked Paths
+
+Common attack paths are blocked at the Nginx layer:
+
+- Directory traversal: `/../`, `/../`
+- WordPress admin: `/wp-login.php`, `/wp-admin`
+- Generic admin: `/admin.php`, `/login.php`
+
+These return `403 Forbidden` without reaching the backend.
+
+### Decoy Website
+
+All requests to paths other than `/beacon` serve static HTML from `/var/www/html`. This makes the C2 server appear as a legitimate website to casual scanners.
+
+## Docker Nginx Image
+
+The Nginx container is built from `redirector/Dockerfile.nginx`:
+
+```dockerfile
+FROM nginx:stable-alpine
+RUN apk add --no-cache nginx-mod-http-headers-more
+```
+
+The `nginx-mod-http-headers-more` module is required for the `more_set_headers` directive used to spoof the Server header.
+
+## Configuration Steps
+
+<Steps>
+  <Step title="Verify certificate paths">
+    Confirm `nginx_docker.conf` references Docker-mounted certificate paths:
+    ```nginx
+    ssl_certificate     /etc/nginx/certs/server.crt;
+    ssl_certificate_key /etc/nginx/certs/server.key;
+    ```
+    
+    These paths correspond to the Docker Compose volume mount:
+    ```yaml
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
+    ```
+  </Step>
+
+  <Step title="Verify backend proxy target">
+    Confirm `nginx_docker.conf` uses the Docker service name:
+    ```nginx
+    proxy_pass http://c2-server:8443/beacon;
+    ```
+    
+    Docker Compose automatically resolves `c2-server` to the backend container IP on the `c2-internal` network.
+  </Step>
+
+  <Step title="Deploy fake website">
+    Place static HTML files in `redirector/site/`:
+    ```bash
+    mkdir -p redirector/site
+    cat > redirector/site/index.html <<EOF
+    <!DOCTYPE html>
+    <html>
+    <head><title>Welcome</title></head>
+    <body><h1>Welcome to our site</h1></body>
+    </html>
+    EOF
+    ```
+    
+    This directory is mounted into the container at `/var/www/html`.
+  </Step>
+
+  <Step title="Start the stack">
+    Deploy both Nginx and the C2 server:
+    ```bash
+    docker compose up -d
+    ```
+  </Step>
+</Steps>
+
+## Testing the Redirector
+
+### Test Beacon Endpoint Returns 400
+
+A `400` response confirms Nginx forwarded the request to the backend:
+
+```bash
+curl -k --resolve c2.lab.internal:443:127.0.0.1 \
+     -X POST https://c2.lab.internal/beacon \
+     -H 'Content-Type: application/octet-stream' \
+     -d 'test' -o /dev/null -w '%{http_code}\n'
+```
+
+Expected: `400` (backend rejected invalid protocol message)
+
+<Warning>
+A `502` means the c2-server container is not running. A `404` means the location block did not match — check the `proxy_pass` configuration.
+</Warning>
+
+### Test Invalid User-Agent Returns 404
+
+```bash
+curl -k --resolve c2.lab.internal:443:127.0.0.1 \
+     -X POST https://c2.lab.internal/beacon \
+     -H 'Content-Type: application/octet-stream' \
+     -H 'User-Agent: curl/7.68.0' \
+     -d 'test' -o /dev/null -w '%{http_code}\n'
+```
+
+Expected: `404` (User-Agent does not contain "Mozilla")
+
+### Test Fake Website is Served
+
+```bash
+curl -k --resolve c2.lab.internal:443:127.0.0.1 \
+     https://c2.lab.internal/ -o /dev/null -w '%{http_code}\n'
+```
+
+Expected: `200` (decoy site served)
+
+### Test Server Header Spoofing
+
+```bash
+curl -k --resolve c2.lab.internal:443:127.0.0.1 \
+     -I https://c2.lab.internal/
+```
+
+Expected header:
+```
+Server: Apache/2.4.54
+```
+
+### Test HTTP to HTTPS Redirect
+
+```bash
+curl -I --resolve c2.lab.internal:80:127.0.0.1 \
+     http://c2.lab.internal/
+```
+
+Expected:
+```
+HTTP/1.1 301 Moved Permanently
+Location: https://c2.lab.internal/
+```
+
+## Viewing Nginx Logs
+
+### Docker Compose Logs
+
+View live Nginx logs:
+```bash
+docker compose logs -f nginx
+```
+
+View access log only:
+```bash
+docker exec c2-nginx tail -f /var/log/nginx/c2_access.log
+```
+
+View error log only:
+```bash
+docker exec c2-nginx tail -f /var/log/nginx/c2_error.log
+```
+
+### Log Format
+
+Access logs use a custom format that includes:
+
+```nginx
+log_format c2_access '$remote_addr "$request" "$http_user_agent" '
+                     'req=$request_length status=$status';
+```
+
+Example log entry:
+```
+192.168.100.20 "POST /beacon HTTP/1.1" "Mozilla/5.0" req=1024 status=200
+```
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `502 Bad Gateway` | Backend not running | Start c2-server before Nginx; check server logs |
+| `404` on valid beacon | User-Agent or Content-Type mismatch | Verify agent sends `Mozilla` UA and `application/octet-stream` |
+| `403` on all requests | IP blocked by `allow`/`deny` rules | Remove IP restrictions in nginx_docker.conf |
+| `nginx: [emerg] module ... not found` | headers-more module missing | Rebuild nginx image with Dockerfile.nginx |
+| `Permission denied` on cert key | Wrong volume mount permissions | Run `chmod 640 certs/server.key` |
+| Server header shows `nginx` | headers-more module not loaded | Check nginx_main.conf includes `load_module` |
+
+## Security Best Practices
+
+<Warning>
+- **Never expose port 8443 to the host network** — only Nginx should be reachable
+- **Always use TLS 1.2 or higher** — disable TLS 1.0 and 1.1
+- **Rotate TLS certificates regularly** — self-signed certs should be regenerated every 90 days
+- **Monitor access logs for anomalies** — unexpected IPs or scanning patterns indicate detection
+- **Use domain fronting in production** — resolve `c2.lab.internal` to a CDN or legitimate domain
+</Warning>
+
+## Advanced Configuration
+
+### Custom User-Agent Filtering
+
+Modify the User-Agent check to match your agent's custom header:
+
+```nginx
+if ($http_user_agent !~* "YourCustomUA") {
+    return 404;
+}
+```
+
+### IP Whitelisting
+
+Restrict beacon endpoint to known agent IPs:
+
+```nginx
+location = /beacon {
+    allow 192.168.100.0/24;
+    deny all;
+    
+    # ... rest of config
+}
+```
+
+### Rate Limiting
+
+Prevent brute-force attacks:
+
+```nginx
+http {
+    limit_req_zone $binary_remote_addr zone=beacon_limit:10m rate=10r/m;
+}
+
+server {
+    location = /beacon {
+        limit_req zone=beacon_limit burst=5;
+        # ... rest of config
+    }
+}
+```
+
+## Next Steps
+
+- Configure [Network and Firewall Rules](/deployment/network-configuration)
+- Generate [TLS Certificates](/deployment/tls-certificates) for secure communication
+- Deploy the full stack with [Docker Compose](/deployment/docker-deployment)

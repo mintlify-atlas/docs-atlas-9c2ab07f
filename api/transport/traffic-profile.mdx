@@ -1,0 +1,456 @@
+---
+title: Traffic Profile
+description: Evasion profile system for network traffic obfuscation and jitter control
+---
+
+## Overview
+
+The traffic profile system manages evasion configurations that control beacon timing, payload padding, and HTTP header randomization. Profiles range from baseline (no evasion) to high (maximum stealth).
+
+**Module**: `transport.traffic_profile`
+
+## EvasionProfile Dataclass
+
+Represents a complete evasion configuration profile.
+
+```python
+@dataclass
+class EvasionProfile:
+    name: str              # Profile name (baseline, low, medium, high)
+    jitter_pct: int        # Jitter percentage (0-100)
+    jitter_strategy: str   # Jitter distribution (uniform, gaussian)
+    padding_min: int       # Minimum payload padding bytes
+    padding_max: int       # Maximum payload padding bytes
+    header_level: int      # HTTP header randomization level (0-3)
+```
+
+### Fields
+
+<ParamField path="name" type="str">
+  Profile identifier. Standard profiles: `baseline`, `low`, `medium`, `high`
+</ParamField>
+
+<ParamField path="jitter_pct" type="int">
+  Beacon timing jitter as percentage of base interval.
+  
+  - `0` = No jitter (fixed interval)
+  - `10` = ±10% variance
+  - `40` = ±40% variance (high stealth)
+</ParamField>
+
+<ParamField path="jitter_strategy" type="str">
+  Statistical distribution for jitter calculation.
+  
+  Valid values:
+  - `uniform` - Flat distribution across range
+  - `gaussian` - Normal distribution (more natural)
+</ParamField>
+
+<ParamField path="padding_min" type="int">
+  Minimum random bytes added to each beacon payload (in bytes)
+</ParamField>
+
+<ParamField path="padding_max" type="int">
+  Maximum random bytes added to each beacon payload (in bytes)
+  
+  <Warning>Must be >= `padding_min` or profile validation fails</Warning>
+</ParamField>
+
+<ParamField path="header_level" type="int">
+  HTTP header randomization intensity (0-3).
+  
+  - `0` = Minimal headers
+  - `1` = Basic browser headers
+  - `2` = Extended headers with variety
+  - `3` = Maximum header randomization
+</ParamField>
+
+## Functions
+
+### load_profile()
+
+Loads a named profile from the configuration file with caching.
+
+```python
+def load_profile(name: str) -> EvasionProfile:
+    """
+    Load a named profile from profile_config.yaml, using cache if available.
+    """
+```
+
+#### Parameters
+
+<ParamField path="name" type="str" required>
+  Profile name to load. Must exist in `profile_config.yaml`.
+  
+  Standard profiles: `baseline`, `low`, `medium`, `high`
+</ParamField>
+
+#### Returns
+
+<ResponseField name="EvasionProfile">
+  Loaded and validated evasion profile object
+</ResponseField>
+
+#### Raises
+
+<ResponseField name="ValueError">
+  Raised when:
+  - Profile name not found in configuration
+  - Invalid jitter strategy (not in `VALID_STRATEGIES`)
+  - `padding_min` exceeds `padding_max`
+</ResponseField>
+
+<ResponseField name="FileNotFoundError">
+  Raised when `profile_config.yaml` is missing
+</ResponseField>
+
+### load_active_profile()
+
+Loads whichever profile is currently set as active in the configuration.
+
+```python
+def load_active_profile() -> EvasionProfile:
+    """
+    Load whichever profile is set as active_profile in profile_config.yaml.
+    """
+```
+
+#### Returns
+
+<ResponseField name="EvasionProfile">
+  The currently active evasion profile
+</ResponseField>
+
+#### Raises
+
+<ResponseField name="ValueError">
+  Raised when `active_profile` field is missing from configuration
+</ResponseField>
+
+## Configuration File
+
+Profiles are defined in `evasion/profile_config.yaml`:
+
+```yaml
+active_profile: medium
+
+profiles:
+  baseline:
+    jitter_pct: 0
+    strategy: uniform
+    padding_min: 0
+    padding_max: 0
+    header_level: 0
+  
+  low:
+    jitter_pct: 10
+    strategy: uniform
+    padding_min: 8
+    padding_max: 32
+    header_level: 1
+  
+  medium:
+    jitter_pct: 20
+    strategy: gaussian
+    padding_min: 32
+    padding_max: 128
+    header_level: 2
+  
+  high:
+    jitter_pct: 40
+    strategy: gaussian
+    padding_min: 64
+    padding_max: 256
+    header_level: 3
+```
+
+### Profile Characteristics
+
+| Profile | Jitter | Strategy | Padding | Headers | Use Case |
+|---------|--------|----------|---------|---------|----------|
+| **baseline** | 0% | uniform | 0 bytes | minimal | Testing, low-security environments |
+| **low** | 10% | uniform | 8-32 bytes | basic | Moderate evasion |
+| **medium** | 20% | gaussian | 32-128 bytes | extended | Balanced stealth/performance |
+| **high** | 40% | gaussian | 64-256 bytes | maximum | High-security environments |
+
+## Usage Examples
+
+### Load Specific Profile
+
+```python
+from transport.traffic_profile import load_profile
+
+# Load high-stealth profile
+profile = load_profile('high')
+
+print(f"Profile: {profile.name}")
+print(f"Jitter: {profile.jitter_pct}% ({profile.jitter_strategy})")
+print(f"Padding: {profile.padding_min}-{profile.padding_max} bytes")
+print(f"Header level: {profile.header_level}")
+
+# Output:
+# Profile: high
+# Jitter: 40% (gaussian)
+# Padding: 64-256 bytes
+# Header level: 3
+```
+
+### Load Active Profile
+
+```python
+from transport.traffic_profile import load_active_profile
+
+# Load whatever profile is currently active
+profile = load_active_profile()
+
+print(f"Using active profile: {profile.name}")
+print(f"Jitter: ±{profile.jitter_pct}%")
+```
+
+### Apply Profile to Beacon Timing
+
+```python
+import time
+import random
+from transport.traffic_profile import load_active_profile
+
+def calculate_jitter(base_interval: int, profile: 'EvasionProfile') -> float:
+    """Apply jitter to base interval using profile settings."""
+    if profile.jitter_pct == 0:
+        return base_interval
+    
+    max_jitter = base_interval * (profile.jitter_pct / 100.0)
+    
+    if profile.jitter_strategy == 'uniform':
+        # Uniform distribution: -max_jitter to +max_jitter
+        jitter = random.uniform(-max_jitter, max_jitter)
+    elif profile.jitter_strategy == 'gaussian':
+        # Gaussian distribution (σ = max_jitter/3 for ~99% within range)
+        jitter = random.gauss(0, max_jitter / 3)
+        jitter = max(-max_jitter, min(max_jitter, jitter))  # Clamp
+    
+    return base_interval + jitter
+
+# Use in beacon loop
+profile = load_active_profile()
+base_interval = 60  # 60 seconds
+
+while True:
+    send_beacon()
+    
+    # Apply jitter from profile
+    sleep_time = calculate_jitter(base_interval, profile)
+    print(f"Next beacon in {sleep_time:.1f}s")
+    time.sleep(sleep_time)
+```
+
+### Apply Profile to Payload Padding
+
+```python
+import os
+from transport.traffic_profile import load_active_profile
+
+def add_padding(payload: bytes, profile: 'EvasionProfile') -> bytes:
+    """Add random padding to payload based on profile."""
+    if profile.padding_min == 0 and profile.padding_max == 0:
+        return payload  # No padding
+    
+    # Random padding length within profile range
+    padding_len = random.randint(profile.padding_min, profile.padding_max)
+    padding = os.urandom(padding_len)
+    
+    # Append padding to payload
+    return payload + padding
+
+# Use in beacon preparation
+profile = load_active_profile()
+original_payload = b"encrypted beacon data"
+padded_payload = add_padding(original_payload, profile)
+
+print(f"Original size: {len(original_payload)} bytes")
+print(f"Padded size: {len(padded_payload)} bytes")
+print(f"Added: {len(padded_payload) - len(original_payload)} bytes of padding")
+```
+
+### Dynamic Profile Switching
+
+```python
+from transport.traffic_profile import load_profile
+import datetime
+
+def get_time_based_profile() -> 'EvasionProfile':
+    """Switch profile based on time of day."""
+    hour = datetime.datetime.now().hour
+    
+    # High stealth during business hours (9 AM - 5 PM)
+    if 9 <= hour < 17:
+        return load_profile('high')
+    # Medium stealth during evening
+    elif 17 <= hour < 23:
+        return load_profile('medium')
+    # Low stealth during night (less monitoring)
+    else:
+        return load_profile('low')
+
+# Use in beacon loop
+current_profile = get_time_based_profile()
+print(f"Using {current_profile.name} profile for current time")
+```
+
+### Profile Comparison
+
+```python
+from transport.traffic_profile import load_profile
+
+def compare_profiles(*profile_names):
+    """Compare multiple profiles side by side."""
+    profiles = [load_profile(name) for name in profile_names]
+    
+    print(f"{'Profile':<12} {'Jitter':<10} {'Strategy':<10} {'Padding':<15} {'Headers'}")
+    print("-" * 70)
+    
+    for p in profiles:
+        padding_range = f"{p.padding_min}-{p.padding_max}B"
+        print(f"{p.name:<12} {p.jitter_pct}%{'':<7} {p.jitter_strategy:<10} {padding_range:<15} {p.header_level}")
+
+# Compare all standard profiles
+compare_profiles('baseline', 'low', 'medium', 'high')
+
+# Output:
+# Profile      Jitter     Strategy   Padding         Headers
+# ----------------------------------------------------------------------
+# baseline     0%         uniform    0-0B            0
+# low          10%        uniform    8-32B           1
+# medium       20%        gaussian   32-128B         2
+# high         40%        gaussian   64-256B         3
+```
+
+### Error Handling
+
+```python
+from transport.traffic_profile import load_profile, load_active_profile
+
+# Handle unknown profile
+try:
+    profile = load_profile('ultra-high')
+except ValueError as e:
+    print(f"Profile error: {e}")
+    # Fallback to baseline
+    profile = load_profile('baseline')
+
+# Handle missing config file
+try:
+    profile = load_active_profile()
+except FileNotFoundError:
+    print("Config file missing, using baseline profile")
+    profile = load_profile('baseline')
+except ValueError as e:
+    print(f"Config error: {e}")
+    profile = load_profile('baseline')
+```
+
+## Caching Behavior
+
+Profiles are cached after first load to avoid repeated file I/O:
+
+```python
+# First load reads from file
+profile1 = load_profile('medium')
+
+# Second load returns cached object (same instance)
+profile2 = load_profile('medium')
+
+assert profile1 is profile2  # True - same object
+```
+
+**Cache invalidation**: Cache persists for the lifetime of the process. To reload from disk, restart the implant.
+
+## Constants
+
+<ResponseField name="PROFILE_CONFIG_PATH" type="str">
+  Path to the profile configuration YAML file.
+  
+  Default: `evasion/profile_config.yaml`
+</ResponseField>
+
+<ResponseField name="VALID_STRATEGIES" type="tuple">
+  Allowed jitter strategy values: `('uniform', 'gaussian')`
+</ResponseField>
+
+## Validation Rules
+
+Profiles are validated when loaded:
+
+1. **Strategy validation**: Must be in `VALID_STRATEGIES`
+2. **Padding validation**: `padding_min <= padding_max`
+3. **Name validation**: Profile must exist in configuration
+4. **Active profile validation**: `active_profile` must reference existing profile
+
+```python
+# Invalid profile examples that will raise ValueError:
+
+invalid_strategy:
+  jitter_pct: 20
+  strategy: exponential  # ❌ Not in VALID_STRATEGIES
+  
+invalid_padding:
+  padding_min: 128
+  padding_max: 64  # ❌ padding_min > padding_max
+```
+
+## Logging
+
+Profile loads are logged for audit:
+
+```python
+logger.info('profile loaded', extra={
+    'profile': 'high',
+    'jitter_pct': 40,
+    'jitter_strategy': 'gaussian',
+    'padding_min': 64,
+    'padding_max': 256,
+    'header_level': 3
+})
+```
+
+## Integration with Other Modules
+
+### HTTP Transport
+
+```python
+# transport/http_transport.py
+from transport.traffic_profile import load_active_profile
+from evasion.header_randomizer import get_headers
+
+profile = load_active_profile()
+headers = get_headers(profile.header_level)
+
+response = session.post(endpoint, data=payload, headers=headers)
+```
+
+### Beacon Loop
+
+```python
+# core/beacon.py
+from transport.traffic_profile import load_active_profile
+
+profile = load_active_profile()
+jitter_pct = profile.jitter_pct
+jitter_strategy = profile.jitter_strategy
+```
+
+## Best Practices
+
+1. **Use `load_active_profile()` in production code** - Allows centralized profile switching
+2. **Use `load_profile(name)` for testing** - Explicit profile selection for test scenarios
+3. **Cache profile objects** - Don't call load functions repeatedly in tight loops
+4. **Validate custom profiles** - If adding custom profiles, ensure all required fields exist
+5. **Log profile changes** - Track when and why profiles are switched for post-op analysis
+
+## Related APIs
+
+- [HTTP Transport](/api/transport/http-transport) - Uses active profile for header randomization
+- [Header Randomizer](/api/evasion/header-randomizer) - Consumes `header_level` from profile
+- [Beacon Loop](/api/core/beacon) - Uses jitter settings for timing variance
+- [Encryption](/api/encryption/aes-gcm) - Padding applied before encryption

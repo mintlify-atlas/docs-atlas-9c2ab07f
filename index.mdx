@@ -1,97 +1,105 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "C2 Framework Documentation"
+description: "A Python-based command and control framework for cybersecurity research with built-in evasion techniques and traffic analysis capabilities"
 ---
 
-## Setting up
+<Warning>
+  **RESEARCH USE ONLY** — This framework is developed for academic and cybersecurity research purposes only. It is designed to operate exclusively within an isolated lab environment. See the [Research Disclaimer](/research-disclaimer) for full terms.
+</Warning>
 
-Get your documentation site up and running in minutes.
+## Overview
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+C2 Framework is a Python-based command and control system designed for cybersecurity research. It provides a complete agent-server architecture with advanced evasion capabilities, encrypted communications, and comprehensive telemetry analysis tools.
 
-## Make it yours
+### Key Features
 
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Encrypted Communications" icon="lock">
+    AES-GCM encryption with HKDF key derivation for secure agent-server communication
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="FastAPI Server" icon="server">
+    Async server with session management, command queuing, and persistent storage
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Traffic Evasion" icon="shield-halved">
+    Configurable jitter strategies, traffic padding, and header randomization
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Docker Deployment" icon="docker">
+    Containerized deployment with nginx redirector for operational security
   </Card>
-</Columns>
+  <Card title="Command Execution" icon="terminal">
+    Safe command execution with security controls and blocklists
+  </Card>
+  <Card title="Telemetry Analysis" icon="chart-line">
+    Built-in traffic capture, flow analysis, and feature extraction tools
+  </Card>
+  <Card title="Operator Console" icon="laptop-code">
+    Interactive CLI for session management and task execution
+  </Card>
+  <Card title="Lab Safety Checks" icon="flask">
+    Environment validation to prevent accidental deployment outside lab networks
+  </Card>
+</CardGroup>
 
-## Create beautiful pages
+## Quick Start
 
-Everything you need to create world-class documentation.
+Get the C2 framework running in your isolated lab environment.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/getting-started/installation">
+    Install dependencies and configure the framework
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Lab Setup" icon="network-wired" href="/getting-started/lab-setup">
+    Configure your isolated lab environment
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Quickstart Guide" icon="rocket" href="/getting-started/quickstart">
+    Deploy the server and agent, execute your first task
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Architecture" icon="diagram-project" href="/architecture">
+    Understand the system architecture and components
   </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## Core Components
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={3}>
+  <Card title="Server" icon="server" href="/concepts/agent-server-model">
+    FastAPI-based C2 server with session management
+  </Card>
+  <Card title="Agent" icon="user-secret" href="/concepts/agent-server-model">
+    Beacon-based agent with command execution
+  </Card>
+  <Card title="Operator Console" icon="terminal" href="/operator/console-interface">
+    Interactive CLI for managing sessions and tasks
+  </Card>
+  <Card title="Cryptography" icon="key" href="/concepts/cryptography">
+    AES-GCM encryption and secure key derivation
+  </Card>
+  <Card title="Evasion" icon="mask" href="/evasion/overview">
+    Traffic obfuscation and anti-detection techniques
+  </Card>
+  <Card title="Telemetry" icon="chart-mixed" href="/telemetry/traffic-capture">
+    Network traffic analysis and feature extraction
+  </Card>
+</CardGroup>
+
+## Documentation Structure
+
+<Tabs>
+  <Tab title="Documentation">
+    - **Overview**: Introduction, disclaimer, and architecture
+    - **Getting Started**: Installation, lab setup, and quickstart
+    - **Core Concepts**: Agent-server model, protocols, cryptography
+    - **Deployment**: Docker setup, network config, TLS certificates
+    - **Operator Guide**: Console interface and session management
+    - **Evasion Techniques**: Jitter, padding, header randomization
+    - **Telemetry**: Traffic capture and analysis tools
+  </Tab>
+  <Tab title="API Reference">
+    - **Server**: Server main, session manager, command queue, storage
+    - **Agent**: Agent main, beacon loop, executor, environment checks
+    - **Common**: Crypto, message format, config, logger
+    - **Transport**: HTTP transport, TLS wrapper, traffic profiles
+    - **Evasion**: Header randomizer, padding, sleep strategies
+    - **Telemetry**: Traffic capture, flow parser, feature extractor
+  </Tab>
+</Tabs>

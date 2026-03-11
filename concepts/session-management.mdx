@@ -1,0 +1,467 @@
+---
+title: "Session Management"
+description: "Session lifecycle, state tracking, and persistence"
+---
+
+## Overview
+
+Sessions are the fundamental unit of agent tracking in the C2 framework. Each agent receives a unique session ID during CHECKIN, which is used to identify and route all subsequent communications. Sessions persist in the database and survive server restarts.
+
+## Session Lifecycle
+
+A session progresses through the following states:
+
+1. **Creation**: Agent sends CHECKIN, server assigns a UUID session ID
+2. **Active**: Agent beacons regularly, executes tasks, reports results
+3. **Inactive**: Agent stops beaconing (network loss, system shutdown, etc.)
+4. **Deactivated**: Operator explicitly kills the session
+5. **Terminated**: Agent receives TERMINATE signal and exits
+
+<Tabs>
+  <Tab title="Session Creation">
+    ```python server/session_manager.py
+    async def create_session(self, payload: dict, db: Database) -> str:
+        # Create a new in-memory SessionState, persist to DB, return session_id
+        session_id = str(uuid.uuid4())
+        now        = time.time()
+
+        state = SessionState(
+            session_id = session_id,
+            hostname   = payload.get('hostname', 'unknown'),
+            username   = payload.get('username', 'unknown'),
+            os         = payload.get('os', 'unknown'),
+            agent_ver  = payload.get('agent_ver', 'unknown'),
+            first_seen = now,
+            last_seen  = now,
+            jitter_pct = payload.get('jitter_pct', 0),
+            active     = True,
+        )
+
+        async with self._lock:
+            self._sessions[session_id] = state
+
+        await db.insert_session(
+            session_id = session_id,
+            hostname   = state.hostname,
+            username   = state.username,
+            os         = state.os,
+            agent_ver  = state.agent_ver,
+            jitter_pct = state.jitter_pct,
+        )
+
+        logger.info('session created',
+                    extra={'session_id': session_id, 'hostname': state.hostname})
+        return session_id
+    ```
+  </Tab>
+  <Tab title="Last Seen Update">
+    ```python server/session_manager.py
+    async def update_last_seen(self, session_id: str, db: Database) -> None:
+        # Update last_seen in memory and persist to DB
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.last_seen = time.time()
+
+        await db.update_last_seen(session_id)
+    ```
+  </Tab>
+  <Tab title="Session Deactivation">
+    ```python server/session_manager.py
+    async def deactivate_session(self, session_id: str, db: Database) -> None:
+        # Mark session inactive in memory and persist to DB
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.active = False
+
+        await db.deactivate_session(session_id)
+        logger.info('session deactivated', extra={'session_id': session_id})
+    ```
+  </Tab>
+</Tabs>
+
+## Session State
+
+The `SessionState` dataclass holds all session metadata:
+
+```python server/session_manager.py
+@dataclass
+class SessionState:
+    session_id: str
+    hostname:   str
+    username:   str
+    os:         str
+    agent_ver:  str
+    first_seen: float
+    last_seen:  float
+    jitter_pct: int
+    active:     bool = True
+```
+
+**Fields:**
+
+- `session_id`: Unique UUID assigned by server
+- `hostname`: System hostname from agent
+- `username`: Current user running the agent
+- `os`: Operating system information (name, release, version)
+- `agent_ver`: Agent version string (e.g., "1.0.0")
+- `first_seen`: Unix timestamp when session was created
+- `last_seen`: Unix timestamp of most recent beacon
+- `jitter_pct`: Beacon interval jitter percentage (0-100)
+- `active`: Boolean flag indicating if session is active
+
+<Note>
+All timestamps are stored as Unix epoch floats (seconds since 1970-01-01 UTC) to simplify arithmetic and avoid timezone issues.
+</Note>
+
+## SessionManager
+
+The `SessionManager` class provides the API for managing sessions:
+
+```python server/session_manager.py
+class SessionManager:
+    # Holds all active sessions in memory, synced to DB on every mutation
+
+    def __init__(self):
+        self._sessions: dict[str, SessionState] = {}
+        self._lock = asyncio.Lock()
+```
+
+**Design Principles:**
+
+1. **In-Memory State**: Sessions are stored in a Python dict for O(1) lookups
+2. **Database Sync**: Every mutation is immediately persisted to SQLite
+3. **Thread Safety**: All operations use an async lock to prevent race conditions
+4. **Restore on Startup**: Active sessions are loaded from DB when server starts
+
+### Core Operations
+
+#### Create Session
+
+Called when an agent sends a CHECKIN message:
+
+```python
+session_id = await session_mgr.create_session(payload, db)
+```
+
+Generates a new UUID, creates `SessionState`, stores in memory and database, and returns the session ID to the agent.
+
+#### Get Session
+
+Retrieve session metadata by ID:
+
+```python
+session = await session_mgr.get_session(session_id)
+if not session:
+    logger.warning('invalid session_id', extra={'session_id': session_id})
+    return None
+```
+
+Returns `SessionState` object or `None` if not found.
+
+#### Update Last Seen
+
+Called on every beacon to track agent activity:
+
+```python server/server_main.py
+await session_mgr.update_last_seen(session_id, db)
+```
+
+Updates the `last_seen` timestamp to the current time.
+
+#### List Sessions
+
+Retrieve all sessions ordered by recency:
+
+```python server/session_manager.py
+async def list_sessions(self) -> list[SessionState]:
+    # Return all in-memory sessions ordered by last_seen descending
+    async with self._lock:
+        sessions = list(self._sessions.values())
+
+    return sorted(sessions, key=lambda s: s.last_seen, reverse=True)
+```
+
+Returns a list of `SessionState` objects sorted by `last_seen` (most recent first).
+
+#### Deactivate Session
+
+Mark a session as inactive (triggered by operator via CLI):
+
+```python
+await session_mgr.deactivate_session(session_id, db)
+```
+
+Sets `active = False` in memory and database. The agent receives a TERMINATE signal on its next beacon.
+
+## CHECKIN Handler
+
+The server's CHECKIN handler creates new sessions:
+
+```python server/server_main.py
+async def _handle_checkin(payload: dict, source_ip: str) -> dict:
+    # Register new agent session and return assigned session_id
+    inner      = payload.get('payload', {})
+    session_id = await session_mgr.create_session(inner, db)
+
+    logger.info('agent checked in', extra={
+        'session_id': session_id,
+        'hostname':   inner.get('hostname'),
+        'source_ip':  source_ip,
+        'username':   inner.get('username'),
+        'os':         inner.get('os'),
+        'agent_ver':  inner.get('agent_ver'),
+    })
+
+    resp = mf._base_payload(mf.MSG_CHECKIN, session_id=session_id)
+    resp['payload'] = {'session_id': session_id, 'status': 'ok'}
+    return resp
+```
+
+The response includes the assigned `session_id`, which the agent stores and includes in all subsequent messages.
+
+## Session Validation
+
+Every beacon handler validates the session before processing:
+
+```python server/server_main.py
+async def _handle_task_pull(session_id: str) -> dict:
+    # Return next pending task for the session, or a no-task response
+    if not session_id:
+        return None
+
+    session = await session_mgr.get_session(session_id)
+    if not session:
+        logger.warning('invalid session_id', extra={'session_id': session_id})
+        return None
+
+    db_session = await db.get_session(session_id)
+    if not db_session or not db_session['active']:
+        logger.info('session deactivated — sending TERMINATE', extra={'session_id': session_id})
+        resp = mf._base_payload(mf.MSG_TERMINATE, session_id=session_id)
+        resp['payload'] = {'reason': 'session killed by operator'}
+        return resp
+
+    await session_mgr.update_last_seen(session_id, db)
+    # ... continue processing
+```
+
+**Validation Steps:**
+
+1. Check if `session_id` exists in memory (`session_mgr.get_session()`)
+2. Check if session is active in database (`db.get_session()`)
+3. If inactive, send TERMINATE signal to agent
+4. If active, update `last_seen` timestamp and continue processing
+
+<Info>
+The server checks both in-memory state and database to ensure consistency. This handles edge cases where the in-memory state might be out of sync due to concurrent operations.
+</Info>
+
+## Agent-Side Session Tracking
+
+The agent stores its session ID after successful CHECKIN:
+
+```python agent/beacon.py
+def _checkin(self) -> None:
+    # Send CHECKIN and store the session_id assigned by the server.
+    global logger
+
+    payload  = _build_checkin_payload()
+    response = _send(payload, self._key)
+
+    self._session_id = (
+        response.get('session_id') or
+        response.get('payload', {}).get('session_id')
+    )
+
+    if not self._session_id:
+        raise TransportError(
+            'CHECKIN response missing session_id — server may have rejected checkin'
+        )
+
+    # Re-create logger with session_id so all subsequent logs are tagged
+    logger = update_session(logger, self._session_id)
+
+    logger.info('checkin complete', extra={
+        'session_id': self._session_id,
+        'hostname':   platform.node(),
+    })
+```
+
+The agent includes this `session_id` in every subsequent message (TASK_PULL, TASK_RESULT, etc.).
+
+<Note>
+**Logger Tagging:**  
+After CHECKIN, the agent updates its logger to include the session ID in all log entries. This makes correlation easier when analyzing logs from multiple agents.
+</Note>
+
+## Persistence and Recovery
+
+Sessions are persisted in the SQLite database and restored on server startup:
+
+```python server/session_manager.py
+async def restore_from_db(self, db: Database) -> None:
+    # Reload active sessions from DB into memory on server restart
+    rows = await db.list_sessions()
+    async with self._lock:
+        for row in rows:
+            if row['active']:
+                self._sessions[row['session_id']] = SessionState(
+                    session_id = row['session_id'],
+                    hostname   = row['hostname'],
+                    username   = row['username'],
+                    os         = row['os'],
+                    agent_ver  = row['agent_ver'],
+                    first_seen = row['first_seen'],
+                    last_seen  = row['last_seen'],
+                    jitter_pct = row['jitter_pct'],
+                    active     = bool(row['active']),
+                )
+    logger.info('sessions restored from DB', extra={'count': len(self._sessions)})
+```
+
+**Recovery Flow:**
+
+1. Server starts and calls `restore_from_db()`
+2. All active sessions are loaded from the database
+3. In-memory `_sessions` dict is populated
+4. Agents continue beaconing with their existing session IDs
+5. Server recognizes the session IDs and resumes normal operation
+
+<Info>
+**Seamless Recovery:**  
+Agents don't need to re-checkin after server restarts. The session persistence mechanism ensures continuity without operator intervention.
+</Info>
+
+## Session Deactivation Flow
+
+When an operator kills a session:
+
+1. **Operator CLI**: Calls `api.kill_session(session_id)`
+2. **API Handler**: Calls `session_mgr.deactivate_session(session_id, db)`
+3. **SessionManager**: Sets `active = False` in memory and database
+4. **Database**: Updates `active` column to 0
+5. **Next Beacon**: Agent sends TASK_PULL
+6. **Server Validation**: Detects `active = False` in database
+7. **TERMINATE Signal**: Server responds with MSG_TERMINATE
+8. **Agent Shutdown**: Agent logs the termination and calls `sys.exit(0)`
+
+```python server/server_main.py
+db_session = await db.get_session(session_id)
+if not db_session or not db_session['active']:
+    logger.info('session deactivated — sending TERMINATE', extra={'session_id': session_id})
+    resp = mf._base_payload(mf.MSG_TERMINATE, session_id=session_id)
+    resp['payload'] = {'reason': 'session killed by operator'}
+    return resp
+```
+
+<Note>
+The TERMINATE signal is sent on the next beacon, not immediately. This means there's a delay of up to one beacon interval before the agent shuts down.
+</Note>
+
+## Session Activity Tracking
+
+The `last_seen` timestamp enables operators to identify inactive or lost agents:
+
+```python
+time_since_last_beacon = time.time() - session.last_seen
+if time_since_last_beacon > 300:  # 5 minutes
+    print(f"Warning: Session {session_id} hasn't beaconed in {time_since_last_beacon}s")
+```
+
+The CLI can display sessions with color coding based on recency:
+
+- **Green**: Beaconed within last 2x beacon interval
+- **Yellow**: Beaconed within last 10 minutes
+- **Red**: No beacon for >10 minutes
+
+## Concurrency and Thread Safety
+
+The `SessionManager` uses an async lock to prevent race conditions:
+
+```python server/session_manager.py
+async with self._lock:
+    session = self._sessions.get(session_id)
+    if session:
+        session.last_seen = time.time()
+```
+
+This ensures that concurrent beacons from multiple agents don't corrupt the in-memory state.
+
+<Info>
+**Why asyncio.Lock instead of threading.Lock?**  
+The server uses FastAPI with uvicorn, which runs on an asyncio event loop. All I/O operations are async, so we use `asyncio.Lock` for async-compatible mutual exclusion.
+</Info>
+
+## Database Schema
+
+Sessions are stored in the `sessions` table:
+
+```sql
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id  TEXT PRIMARY KEY,
+    hostname    TEXT NOT NULL,
+    username    TEXT NOT NULL,
+    os          TEXT NOT NULL,
+    agent_ver   TEXT NOT NULL,
+    first_seen  REAL NOT NULL,
+    last_seen   REAL NOT NULL,
+    jitter_pct  INTEGER NOT NULL,
+    active      INTEGER DEFAULT 1
+)
+```
+
+**Column Descriptions:**
+
+- `session_id`: UUID as TEXT (primary key)
+- `hostname`: Agent system hostname
+- `username`: Agent process username
+- `os`: OS information string
+- `agent_ver`: Agent version
+- `first_seen`: Unix timestamp (REAL) when session was created
+- `last_seen`: Unix timestamp (REAL) of most recent beacon
+- `jitter_pct`: Beacon jitter percentage (0-100)
+- `active`: Boolean as INTEGER (1 = active, 0 = inactive)
+
+<Note>
+SQLite doesn't have native boolean or timestamp types, so we use INTEGER for booleans (0/1) and REAL for Unix timestamps (floating point seconds since epoch).
+</Note>
+
+## Best Practices
+
+### Monitoring Sessions
+
+Operators should regularly check session status:
+
+```bash
+# List all sessions with timestamps
+c2 sessions
+
+# Show details for a specific session
+c2 session <session_id>
+```
+
+### Handling Lost Agents
+
+If an agent stops beaconing:
+
+1. Check network connectivity between agent and server
+2. Check if the agent process is still running
+3. Check agent logs for errors or exceptions
+4. Consider the `last_seen` timestamp to determine if the agent is truly lost
+
+### Cleaning Up Old Sessions
+
+Inactive sessions remain in the database indefinitely. Operators should periodically clean up old sessions:
+
+```sql
+-- Delete sessions inactive for >30 days
+DELETE FROM sessions 
+WHERE active = 0 
+AND last_seen < unixepoch() - 2592000;
+```
+
+<Info>
+A future enhancement could add automatic session expiration based on inactivity threshold.
+</Info>

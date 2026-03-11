@@ -1,0 +1,220 @@
+---
+title: HTTP Transport
+description: Send encrypted beacons over HTTPS with TLS pinning and host validation
+---
+
+## Overview
+
+The HTTP transport layer provides secure beacon communication over HTTPS with certificate pinning and host validation. All requests use a TLS-pinned session and validate against an allowlist of approved servers.
+
+**Module**: `transport.http_transport`
+
+## Functions
+
+### send_beacon()
+
+Sends an encrypted beacon payload to the C2 server via HTTPS POST request.
+
+```python
+def send_beacon(endpoint: str, payload: bytes) -> bytes:
+    """
+    Validate host, POST encrypted payload, return raw response bytes.
+    """
+```
+
+#### Parameters
+
+<ParamField path="endpoint" type="str" required>
+  Full HTTPS URL of the C2 beacon endpoint. Hostname must be in `ALLOWED_HOSTS` configuration.
+  
+  Example: `https://192.168.100.10:8443/beacon`
+</ParamField>
+
+<ParamField path="payload" type="bytes" required>
+  Encrypted beacon data to send to the server. Should be pre-encrypted by the encryption layer.
+</ParamField>
+
+#### Returns
+
+<ResponseField name="response" type="bytes">
+  Raw response body from the server, limited to `MAX_RESPONSE_BYTES` (65536 bytes)
+</ResponseField>
+
+#### Raises
+
+<ResponseField name="TransportError">
+  Raised when:
+  - Endpoint hostname is not in `ALLOWED_HOSTS`
+  - Endpoint URL is malformed or missing hostname
+  - Connection fails or times out
+  - Server returns HTTP status >= 400
+  - Request times out after `REQUEST_TIMEOUT_S` (10 seconds)
+</ResponseField>
+
+#### Security Features
+
+1. **Host Validation**: Only connects to servers in the `ALLOWED_HOSTS` configuration
+2. **TLS Certificate Pinning**: Uses a specific certificate via `TLSAdapter`
+3. **Request Timeout**: Hard 10-second timeout prevents hanging connections
+4. **Response Size Limit**: Caps response at 65536 bytes to prevent memory exhaustion
+5. **Traffic Profiling**: Automatically applies evasion profile headers
+
+## Usage Examples
+
+### Basic Beacon Send
+
+```python
+from transport.http_transport import send_beacon
+from common.utils import TransportError
+
+# Prepare encrypted payload
+encrypted_data = b"\x89\x50\x4e\x47..."  # Your encrypted beacon
+
+try:
+    response = send_beacon(
+        endpoint='https://192.168.100.10:8443/beacon',
+        payload=encrypted_data
+    )
+    print(f"Received {len(response)} bytes from server")
+except TransportError as e:
+    print(f"Beacon failed: {e}")
+```
+
+### With Error Handling
+
+```python
+from transport.http_transport import send_beacon
+from common.utils import TransportError
+import time
+
+def send_with_retry(endpoint: str, payload: bytes, max_retries: int = 3) -> bytes:
+    """Send beacon with exponential backoff retry."""
+    for attempt in range(max_retries):
+        try:
+            return send_beacon(endpoint, payload)
+        except TransportError as e:
+            if attempt == max_retries - 1:
+                raise
+            wait = 2 ** attempt
+            print(f"Retry {attempt + 1}/{max_retries} after {wait}s: {e}")
+            time.sleep(wait)
+
+# Use in beacon loop
+response = send_with_retry(
+    endpoint='https://192.168.100.10:8443/beacon',
+    payload=encrypted_data
+)
+```
+
+### Checking HTTP Status Codes
+
+```python
+from transport.http_transport import send_beacon
+from common.utils import TransportError
+
+try:
+    response = send_beacon(endpoint, payload)
+    # Success - process response
+    process_response(response)
+except TransportError as e:
+    # Check if error has HTTP status code
+    if hasattr(e, 'status_code'):
+        if e.status_code == 404:
+            print("Endpoint not found - check server configuration")
+        elif e.status_code >= 500:
+            print("Server error - may retry")
+    else:
+        print(f"Network error: {e}")
+```
+
+## Configuration
+
+The transport layer relies on several configuration values:
+
+```python
+# common/config.py
+ALLOWED_HOSTS = ['192.168.100.10', 'c2.lab.internal']
+TLS_CERT_PATH = 'certs/server.crt'
+SERVER_PORT = 8443
+```
+
+### Constants
+
+<ResponseField name="REQUEST_TIMEOUT_S" type="int" default="10">
+  Hard timeout in seconds for all outbound HTTP requests
+</ResponseField>
+
+<ResponseField name="MAX_RESPONSE_BYTES" type="int" default="65536">
+  Maximum response size to prevent oversized server responses (64 KB)
+</ResponseField>
+
+## TLSAdapter Class
+
+Internal adapter that forces the requests library to use a specific SSL context.
+
+```python
+class TLSAdapter(HTTPAdapter):
+    """Adapter that forces requests to use a specific SSLContext."""
+    
+    def __init__(self, ssl_context):
+        self._ssl_context = ssl_context
+        super().__init__()
+    
+    def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
+        kwargs['ssl_context'] = self._ssl_context
+        return super().init_poolmanager(connections, maxsize, block, **kwargs)
+```
+
+## Internal Functions
+
+### _build_session()
+
+Creates a `requests.Session` with TLS certificate pinning.
+
+```python
+def _build_session() -> requests.Session:
+    """Create a requests.Session with TLS cert pinned to config.TLS_CERT_PATH."""
+```
+
+**Raises**: `TransportError` if certificate file not found at `TLS_CERT_PATH`
+
+### _validate_host()
+
+Validates that the endpoint hostname is in the allowed hosts list.
+
+```python
+def _validate_host(endpoint: str) -> None:
+    """Raise TransportError if the endpoint host is not in ALLOWED_HOSTS."""
+```
+
+**Raises**: `TransportError` if hostname is missing, invalid, or not in `ALLOWED_HOSTS`
+
+## Logging
+
+The transport layer logs key events:
+
+```python
+# Successful beacon
+logger.info('sending beacon', extra={
+    'endpoint': 'https://192.168.100.10:8443/beacon',
+    'payload_size': 1024
+})
+
+logger.info('beacon response received', extra={
+    'endpoint': 'https://192.168.100.10:8443/beacon',
+    'status_code': 200,
+    'response_size': 512
+})
+
+# Errors
+logger.warning('connection error', extra={
+    'endpoint': 'https://192.168.100.10:8443/beacon',
+    'reason': 'Connection refused'
+})
+```
+
+## Related APIs
+
+- [TLS Wrapper](/api/transport/tls-wrapper) - Certificate pinning and SSL context creation
+- [Traffic Profile](/api/transport/traffic-profile) - Evasion profiles for header randomization
+- [Encryption API](/api/encryption/aes-gcm) - Payload encryption before transport

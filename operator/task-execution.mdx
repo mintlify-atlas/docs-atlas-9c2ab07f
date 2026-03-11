@@ -1,0 +1,471 @@
+---
+title: Task Execution
+description: Executing commands on agents and understanding task lifecycle
+---
+
+Tasks are commands queued for execution on remote agents. The C2 framework uses a persistent task queue to ensure reliable command delivery even if agents are temporarily offline.
+
+## Task Lifecycle
+
+### 1. Task Creation
+
+Operators enqueue tasks using the `task` command:
+
+```
+c2> task a1b2c3d4-e5f6-7890-abcd-ef1234567890 whoami
+  Task enqueued — task_id: 9f8e7d6c-5b4a-3210-9876-543210abcdef
+```
+
+The server:
+1. Validates the session exists and is active
+2. Creates a unique task UUID
+3. Adds the task to the session's queue
+4. Persists the task to the database
+5. Returns the task ID to the operator
+
+### 2. Task Dispatch
+
+When the agent beacons:
+1. Server checks for pending tasks for that session
+2. Retrieves the next `PENDING` task from the queue
+3. Sends the task to the agent
+4. Marks the task as `DISPATCHED`
+
+### 3. Task Execution
+
+The agent:
+1. Receives the task payload
+2. Executes the command using `agent/executor.py`
+3. Captures stdout, stderr, exit code, and duration
+4. Returns the result on the next beacon
+
+### 4. Result Storage
+
+The server:
+1. Receives the result from the agent
+2. Marks the task as `COMPLETE`
+3. Stores the result in the database
+4. Makes it available via the `results` command
+
+## Executing Tasks
+
+### Basic Task Syntax
+
+```
+task <session_id> <command> [args...]
+```
+
+**Examples:**
+
+```bash
+# Simple command
+c2> task a1b2c3d4-e5f6-7890-abcd-ef1234567890 whoami
+
+# Command with arguments
+c2> task a1b2c3d4-e5f6-7890-abcd-ef1234567890 ping -n 4 8.8.8.8
+
+# Multiple arguments
+c2> task a1b2c3d4-e5f6-7890-abcd-ef1234567890 powershell -Command Get-Process
+```
+
+### Command Arguments
+
+Arguments are space-separated and passed as a list to the agent:
+
+```python
+parts = line.split()
+command = parts[0]  # e.g., 'ping'
+args = parts[1:]    # e.g., ['-n', '4', '8.8.8.8']
+```
+
+The agent reconstructs the full command:
+
+```python
+cmd_list = [command] + args
+result = subprocess.run(cmd_list, ...)
+```
+
+### Task Timeout
+
+All tasks have a default timeout of **30 seconds**:
+
+```python
+task_id = await cmd_queue.enqueue_task(
+    session_id = session_id,
+    command    = command,
+    args       = task_args,
+    timeout_s  = 30,  # default timeout
+    db         = db,
+)
+```
+
+If a command exceeds the timeout, it returns exit code **124** with `TIMEOUT` in stderr.
+
+## Task Status States
+
+Tasks progress through four states:
+
+### PENDING
+
+Task is queued but not yet sent to the agent:
+
+```python
+class TaskStatus(str, Enum):
+    PENDING    = 'PENDING'
+    DISPATCHED = 'DISPATCHED'
+    COMPLETE   = 'COMPLETE'
+    ERROR      = 'ERROR'
+```
+
+### DISPATCHED
+
+Task has been sent to the agent and is awaiting execution.
+
+### COMPLETE
+
+Task executed successfully (regardless of exit code). Result is available.
+
+### ERROR
+
+Task encountered an error during execution or transmission.
+
+## Command Blocklist
+
+Certain commands are blocked for safety and compliance:
+
+```python
+BLOCKED_COMMANDS = [
+    'reg',              # Windows registry
+    'schtasks',         # Scheduled tasks
+    'at',               # Legacy scheduler
+    'sc',               # Service control
+    'net use',          # Network shares
+    'arp',              # ARP table
+    'nmap',             # Port scanning
+    'whoami /priv',     # Privilege enumeration
+    'net localgroup',   # Group membership
+]
+```
+
+Blocked commands return **exit code 126** with `BLOCKED: prohibited command` in stderr:
+
+```
+c2> task a1b2c3d4-e5f6-7890-abcd-ef1234567890 nmap 192.168.1.0/24
+  Task enqueued — task_id: 9f8e7d6c-5b4a-3210-9876-543210abcdef
+
+c2> results a1b2c3d4-e5f6-7890-abcd-ef1234567890
+TASK ID                               EXIT      DURATION  STDOUT
+9f8e7d6c-5b4a-3210-9876-543210abcdef  126       5ms       
+
+  Task ID   : 9f8e7d6c-5b4a-3210-9876-543210abcdef
+  Exit code : 126
+  Duration  : 5ms
+  STDOUT:
+(empty)
+  STDERR:
+BLOCKED: prohibited command
+```
+
+### Blocklist Implementation
+
+The blocklist check is case-insensitive and matches command names with or without arguments:
+
+```python
+def _is_blocked(command: str) -> bool:
+    command_lower = command.lower().strip()
+    return any(
+        command_lower == blocked.lower() or
+        command_lower.startswith(blocked.lower() + " ")
+        for blocked in config.BLOCKED_COMMANDS
+    )
+```
+
+Implementation: `agent/executor.py:23`
+
+## Command Execution
+
+Commands are executed using Python's `subprocess` module with **shell=False** for security:
+
+```python
+result = subprocess.run(
+    cmd_list,
+    capture_output = True,
+    text           = True,
+    timeout        = timeout_s,
+    shell          = False,  # prevents command injection
+)
+```
+
+This approach:
+- Prevents shell injection attacks
+- Ensures safe argument handling
+- Provides timeout protection
+- Captures stdout and stderr separately
+
+Implementation: `agent/executor.py:80`
+
+## Exit Codes
+
+The framework uses standard exit codes:
+
+| Exit Code | Meaning | Example |
+|-----------|---------|--------|
+| **0** | Success | `whoami` completed successfully |
+| **1-125** | Command-specific errors | `ping` to unreachable host |
+| **126** | Blocked command | `nmap` or other prohibited commands |
+| **127** | Command not found | `nonexistent_command` |
+| **124** | Timeout | Command exceeded 30 second limit |
+
+### Exit Code Examples
+
+```bash
+# Success (exit 0)
+c2> task <id> whoami
+# Result: exit_code=0, stdout="VICTIM-PC\jdoe"
+
+# Command error (exit 1)
+c2> task <id> ping invalid-host
+# Result: exit_code=1, stderr="Ping request could not find host..."
+
+# Blocked (exit 126)
+c2> task <id> nmap 192.168.1.1
+# Result: exit_code=126, stderr="BLOCKED: prohibited command"
+
+# Not found (exit 127)
+c2> task <id> fake_command
+# Result: exit_code=127, stderr="COMMAND NOT FOUND"
+
+# Timeout (exit 124)
+c2> task <id> sleep 60
+# Result: exit_code=124, stderr="TIMEOUT"
+```
+
+## Task Queue Architecture
+
+The `CommandQueue` class manages task distribution:
+
+### Per-Session Queues
+
+Each session has its own asyncio queue:
+
+```python
+self._queues: dict[str, asyncio.Queue] = {}
+```
+
+This ensures tasks are delivered in order to each agent.
+
+### Task Registry
+
+All tasks are indexed by task_id for O(1) lookups:
+
+```python
+self._tasks: dict[str, Task] = {}
+```
+
+### Task Enqueueing
+
+```python
+task_id = await cmd_queue.enqueue_task(
+    session_id = session_id,
+    command    = command,
+    args       = task_args,
+    timeout_s  = 30,
+    db         = db,
+)
+```
+
+Implementation: `server/command_queue.py:49`
+
+### Task Peeking
+
+The server peeks at the next pending task without removing it:
+
+```python
+task = await cmd_queue.peek_task(session_id, db)
+if task:
+    # Send to agent
+    await cmd_queue.mark_dispatched(task.task_id, db)
+```
+
+This ensures tasks aren't lost if dispatch fails.
+
+Implementation: `server/command_queue.py:82`
+
+## Task Data Model
+
+Tasks are represented by the `Task` dataclass:
+
+```python
+@dataclass
+class Task:
+    task_id:    str          # UUID
+    session_id: str          # Target session UUID
+    command:    str          # Command name
+    args:       list         # Command arguments
+    timeout_s:  int          # Execution timeout
+    queued_at:  float        # Unix timestamp
+    status:     TaskStatus   # PENDING/DISPATCHED/COMPLETE/ERROR
+```
+
+Implementation: `server/command_queue.py:24`
+
+## Output Size Limits
+
+Command output is capped at **64 KB** to prevent memory issues:
+
+```python
+MAX_OUTPUT = 65536  # 64 KB cap
+
+TaskResult(
+    task_id     = task_id,
+    stdout      = (result.stdout or '')[:MAX_OUTPUT],
+    stderr      = (result.stderr or '')[:MAX_OUTPUT],
+    exit_code   = result.returncode,
+    duration_ms = elapsed,
+)
+```
+
+If output exceeds this limit, it is silently truncated.
+
+Implementation: `agent/executor.py:9`
+
+## Task Persistence
+
+All tasks are persisted to the database when enqueued:
+
+```python
+await db.insert_task(
+    task_id    = task.task_id,
+    session_id = session_id,
+    command    = command,
+    args       = json.dumps(args),  # stored as JSON
+    timeout_s  = timeout_s,
+)
+```
+
+This ensures tasks survive server restarts.
+
+### Database Recovery
+
+If the server restarts, pending tasks are automatically reloaded:
+
+```python
+row = await db.get_pending_task(session_id)
+if row:
+    task = Task(
+        task_id=row["task_id"],
+        session_id=row["session_id"],
+        command=row["command"],
+        args=json.loads(row["args"]),
+        timeout_s=row["timeout_s"],
+        queued_at=row["queued_at"],
+        status=TaskStatus.PENDING,
+    )
+```
+
+Implementation: `server/command_queue.py:94`
+
+## Task Execution Best Practices
+
+### 1. Start with Safe Commands
+
+Test connectivity with simple commands:
+
+```bash
+c2> task <id> whoami
+c2> task <id> hostname
+c2> task <id> pwd
+```
+
+### 2. Check Results Promptly
+
+Always verify task results:
+
+```bash
+c2> results <id>
+```
+
+### 3. Handle Long-Running Commands
+
+Commands that exceed 30 seconds will timeout. For long operations:
+
+- Break into smaller tasks
+- Use background execution on the target system
+- Consider modifying the timeout in the code
+
+### 4. Respect the Blocklist
+
+The blocklist exists for safety and compliance. Do not attempt to bypass it.
+
+### 5. Monitor Task Status
+
+Check task completion by reviewing results regularly:
+
+```bash
+c2> results <id>
+```
+
+Look for tasks with non-zero exit codes or missing results.
+
+## Error Handling
+
+### Invalid Session
+
+```
+c2> task nonexistent-id whoami
+  ERROR: session nonexistent-id not found.
+```
+
+Verify the session ID with `list`.
+
+### Inactive Session
+
+```
+c2> task <inactive-id> whoami
+  ERROR: session <inactive-id> is inactive.
+```
+
+You cannot task inactive sessions.
+
+### Blocked Command
+
+```
+c2> task <id> nmap 192.168.1.0/24
+  Task enqueued — task_id: <task-id>
+
+# Result will show exit_code=126
+```
+
+Check the blocklist in `common/config.py`.
+
+### Command Not Found
+
+```
+c2> task <id> fake_command
+  Task enqueued — task_id: <task-id>
+
+# Result will show exit_code=127
+```
+
+Verify the command exists on the target system.
+
+## Logging
+
+All task operations are logged:
+
+```python
+logger.info('operator enqueued task', extra={
+    'session_id': session_id,
+    'task_id': task_id,
+    'command': command,
+})
+
+logger.info('task dispatched', extra={'task_id': task_id})
+
+logger.info('task complete', extra={
+    'task_id': task_id,
+    'exit_code': result.get('exit_code'),
+})
+```
+
+Check `logs/` for detailed task execution history.

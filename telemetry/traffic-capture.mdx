@@ -1,0 +1,223 @@
+---
+title: 'Traffic Capture'
+description: 'PCAP traffic capture using tcpdump for network analysis'
+---
+
+## Overview
+
+The traffic capture module provides a Python wrapper around `tcpdump` for capturing network traffic to PCAP files. It's used to record beacon traffic during experiments for subsequent flow analysis and feature extraction.
+
+**Source**: `telemetry/traffic_capture.py`
+
+## Key Features
+
+- **tcpdump Integration**: Spawns and manages tcpdump subprocesses
+- **BPF Filtering**: Supports Berkeley Packet Filter expressions
+- **Automatic Directory Management**: Creates `pcaps/` directory automatically
+- **UTC+7 Timestamping**: Generates timestamps in UTC+7 timezone for filenames
+- **Graceful Shutdown**: Handles SIGINT/SIGTERM with clean capture termination
+- **Profile Labeling**: Embeds evasion profile parameters in PCAP filenames
+
+## Core Functions
+
+### start_capture
+
+Launches tcpdump as a background subprocess:
+
+```python
+from telemetry.traffic_capture import start_capture
+
+proc = start_capture(
+    interface='eth0',
+    output_file='capture.pcap',
+    bpf_filter='tcp port 443'
+)
+```
+
+**Parameters**:
+- `interface` (str): Network interface to capture on (e.g., `eth0`, `enp0s8`)
+- `output_file` (str): Output filename (automatically placed in `pcaps/` directory)
+- `bpf_filter` (str): BPF filter expression (default: `'tcp port 443'`)
+
+**Returns**: `subprocess.Popen` object for the tcpdump process
+
+**Requirements**: 
+- `tcpdump` must be installed and on PATH
+- Root/sudo privileges typically required on Linux
+
+### stop_capture
+
+Terminates a running tcpdump process gracefully:
+
+```python
+from telemetry.traffic_capture import stop_capture
+
+stop_capture(proc)
+```
+
+**Parameters**:
+- `proc` (subprocess.Popen): Process returned by `start_capture()`
+
+**Behavior**:
+1. Sends SIGTERM to tcpdump
+2. Waits up to 5 seconds for clean exit
+3. Sends SIGKILL if timeout expires
+4. Logs warnings if process already exited
+
+### label_capture
+
+Generates standardized PCAP filenames embedding profile parameters:
+
+```python
+from telemetry.traffic_capture import label_capture
+from transport.traffic_profile import EvasionProfile
+
+profile = EvasionProfile(jitter_pct=15, padding_max=200)
+filename = label_capture('baseline', profile)
+# Returns: 'baseline_jitter15_pad200_20260311_143052.pcap'
+```
+
+**Format**: `{base_name}_jitter{pct}_pad{max}_{timestamp}.pcap`
+
+## Command-Line Usage
+
+Run as a standalone module:
+
+```bash
+# Basic capture
+python -m telemetry.traffic_capture \
+  --interface eth0 \
+  --output capture.pcap
+
+# Custom BPF filter
+python -m telemetry.traffic_capture \
+  --interface enp0s8 \
+  --output beacon.pcap \
+  --filter 'tcp port 8443'
+
+# Timed capture (auto-stop after 60 seconds)
+python -m telemetry.traffic_capture \
+  --interface eth0 \
+  --output test.pcap \
+  --duration 60
+```
+
+**Arguments**:
+- `--interface` (required): Network interface name
+- `--output` (required): Output PCAP filename
+- `--filter` (optional): BPF filter expression (default: `tcp port 443`)
+- `--duration` (optional): Capture duration in seconds (default: 0 = until Ctrl+C)
+
+## Integration Example
+
+Typical usage in experiment scripts:
+
+```python
+import os
+from telemetry import traffic_capture
+from common import config
+
+# Start capture before running agent
+pcap_filename = 'experiment.pcap'
+capture_proc = traffic_capture.start_capture(
+    interface='enp0s8',
+    output_file=pcap_filename,
+    bpf_filter=f'tcp port {config.SERVER_PORT}'
+)
+
+try:
+    # Run your experiment here
+    run_experiment()
+finally:
+    # Always stop capture, even if experiment fails
+    traffic_capture.stop_capture(capture_proc)
+
+# PCAP is now available at pcaps/experiment.pcap
+pcap_path = os.path.join('pcaps', pcap_filename)
+```
+
+## File Organization
+
+**Capture Directory**: All PCAPs are automatically saved to `pcaps/` directory
+
+```
+project_root/
+├── pcaps/
+│   ├── baseline_jitter0_pad0_20260311_143052.pcap
+│   ├── low_jitter5_pad100_20260311_143245.pcap
+│   ├── medium_jitter10_pad150_20260311_143438.pcap
+│   └── high_jitter15_pad200_20260311_143631.pcap
+└── telemetry/
+    └── traffic_capture.py
+```
+
+## Configuration
+
+**Default Constants** (defined in `telemetry/traffic_capture.py:15-17`):
+
+```python
+DEFAULT_BPF_FILTER = 'tcp port 443'
+CAPTURE_DIR = 'pcaps'
+UTC_PLUS_7 = timezone(timedelta(hours=7))
+```
+
+## Common BPF Filters
+
+```bash
+# Capture HTTPS traffic
+'tcp port 443'
+
+# Capture specific C2 server port
+'tcp port 8443'
+
+# Capture traffic to/from specific IP
+'host 192.168.56.101'
+
+# Capture outbound connections only
+'tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0'
+
+# Combine filters
+'tcp port 443 and host 10.0.0.5'
+```
+
+## Error Handling
+
+**tcpdump Not Found**:
+```python
+try:
+    proc = start_capture('eth0', 'capture.pcap')
+except RuntimeError as e:
+    print(f'Error: {e}')  # "tcpdump not found on PATH"
+```
+
+**Permission Denied**:
+- Run with `sudo` on Linux: `sudo python -m telemetry.traffic_capture ...`
+- Or grant capabilities: `sudo setcap cap_net_raw,cap_net_admin=eip $(which tcpdump)`
+
+## Logging
+
+Capture operations are logged via structured logger:
+
+```python
+from common.logger import get_logger
+logger = get_logger('traffic_capture')
+```
+
+**Log Events**:
+- `capture started`: Logged when tcpdump spawns (includes PID)
+- `capture stopped`: Logged on clean exit (includes return code)
+- `capture process already exited`: Warning if stop called on dead process
+
+## Next Steps
+
+After capturing traffic:
+
+1. **Parse flows**: Use [Flow Parser](/telemetry/flow-analysis) to extract FlowRecords
+2. **Extract features**: Use [Feature Extractor](/telemetry/feature-extraction) for ML features
+3. **Run experiments**: See [Experiments](/telemetry/experiments) for automated pipelines
+
+## See Also
+
+- [Flow Analysis](/telemetry/flow-analysis) - Parse PCAPs into flow records
+- [Feature Extraction](/telemetry/feature-extraction) - Extract ML features from flows
+- [Experiments](/telemetry/experiments) - Automated capture and analysis pipelines

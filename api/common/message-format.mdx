@@ -1,0 +1,361 @@
+---
+title: 'Message Format'
+description: 'Binary envelope packing, unpacking, and message builders for the C2 protocol'
+icon: 'envelope'
+---
+
+## Overview
+
+The message format module handles serialization, encryption, and framing of C2 protocol messages. It implements a secure binary wire format with a 7-byte header followed by encrypted payload.
+
+**File:** `common/message_format.py`
+
+## Wire Format
+
+```
+[ Header: 7 bytes | Nonce: 12 bytes | Ciphertext + Tag: variable ]
+
+Header structure (big-endian):
+  - magic: 2 bytes (0xC2C2)
+  - version: 1 byte (0x01)
+  - body_length: 4 bytes (uint32)
+```
+
+## Constants
+
+<ParamField path="MAGIC" type="int" default="0xC2C2">
+  Protocol magic bytes for frame identification
+</ParamField>
+
+<ParamField path="PROTOCOL_VERSION" type="int" default="0x01">
+  Current protocol version
+</ParamField>
+
+<ParamField path="HEADER_FORMAT" type="str" default="'!HBI'">
+  Struct format for header: big-endian uint16 + uint8 + uint32
+</ParamField>
+
+<ParamField path="HEADER_SIZE" type="int" default="7">
+  Total header size in bytes
+</ParamField>
+
+### Message Types
+
+<ParamField path="MSG_CHECKIN" type="str" default="'CHECKIN'">
+  Agent initial check-in message
+</ParamField>
+
+<ParamField path="MSG_TASK_PULL" type="str" default="'TASK_PULL'">
+  Agent polling for new tasks
+</ParamField>
+
+<ParamField path="MSG_TASK_RESULT" type="str" default="'TASK_RESULT'">
+  Agent task execution results
+</ParamField>
+
+<ParamField path="MSG_TASK_DISPATCH" type="str" default="'TASK_DISPATCH'">
+  Server task dispatch to agent
+</ParamField>
+
+<ParamField path="MSG_HEARTBEAT" type="str" default="'HEARTBEAT'">
+  Agent heartbeat message
+</ParamField>
+
+<ParamField path="MSG_TERMINATE" type="str" default="'TERMINATE'">
+  Terminate agent session
+</ParamField>
+
+## Core Functions
+
+### pack()
+
+Serialize, encrypt, and frame a payload dictionary into a C2 envelope.
+
+```python
+pack(payload_dict: dict, key: bytes) -> bytes
+```
+
+<ParamField path="payload_dict" type="dict" required>
+  Message payload to pack (must be JSON-serializable)
+</ParamField>
+
+<ParamField path="key" type="bytes" required>
+  32-byte encryption key
+</ParamField>
+
+<ResponseField name="return" type="bytes">
+  Complete binary envelope ready for transmission
+</ResponseField>
+
+**Process:**
+1. JSON-serialize the payload dict
+2. Apply padding using active traffic profile
+3. Encrypt with AES-GCM
+4. Prepend nonce to ciphertext
+5. Build 7-byte header with magic, version, and body length
+6. Concatenate header + body
+
+**Raises:**
+- `ProtocolError` - If payload is not a dict, empty, or not JSON-serializable
+- `CryptoError` - If encryption fails
+
+**Example:**
+```python
+from common.message_format import pack, build_checkin
+from common.crypto import get_session_key
+
+key = get_session_key()
+msg = build_checkin('VICTIM-PC', 'jdoe', 'Windows 10', '1.0.0', 20)
+envelope = pack(msg, key)
+```
+
+---
+
+### unpack()
+
+Validate, decrypt, and deserialize a raw C2 envelope into a dictionary.
+
+```python
+unpack(raw: bytes, key: bytes) -> dict
+```
+
+<ParamField path="raw" type="bytes" required>
+  Raw binary envelope received from network
+</ParamField>
+
+<ParamField path="key" type="bytes" required>
+  32-byte decryption key (must match the key used for packing)
+</ParamField>
+
+<ResponseField name="return" type="dict">
+  Deserialized payload dictionary
+</ResponseField>
+
+**Process:**
+1. Validate frame has minimum length (7 bytes header + 12 nonce + 16 tag)
+2. Unpack and verify header (magic, version, body_length)
+3. Extract nonce and ciphertext from body
+4. Decrypt and verify authentication tag
+5. Strip padding
+6. Parse JSON and validate it's a dict
+
+**Raises:**
+- `ProtocolError` - If frame is truncated, has bad magic, unsupported version, or invalid JSON
+- `CryptoError` - If authentication tag verification fails (tampered data or wrong key)
+
+**Example:**
+```python
+from common.message_format import unpack
+from common.crypto import get_session_key
+
+key = get_session_key()
+payload = unpack(envelope_bytes, key)
+print(payload['msg_type'])
+```
+
+## Message Builders
+
+All message builders return a dictionary with mandatory fields:
+- `msg_type`: Message type identifier
+- `session_id`: Session identifier (if applicable)
+- `timestamp`: Unix timestamp (int)
+- `nonce`: UUID hex for replay protection
+- `payload`: Type-specific payload data
+
+### build_checkin()
+
+Build an agent check-in message.
+
+```python
+build_checkin(hostname: str, username: str, os_info: str, 
+              agent_ver: str, jitter_pct: int) -> dict
+```
+
+<ParamField path="hostname" type="str" required>
+  Agent hostname
+</ParamField>
+
+<ParamField path="username" type="str" required>
+  Current username
+</ParamField>
+
+<ParamField path="os_info" type="str" required>
+  Operating system information
+</ParamField>
+
+<ParamField path="agent_ver" type="str" required>
+  Agent version string
+</ParamField>
+
+<ParamField path="jitter_pct" type="int" required>
+  Beacon jitter percentage (0-100)
+</ParamField>
+
+<ResponseField name="return" type="dict">
+  Message dict with `msg_type='CHECKIN'` and agent info in payload
+</ResponseField>
+
+**Example:**
+```python
+msg = build_checkin(
+    hostname='VICTIM-PC',
+    username='jdoe',
+    os_info='Windows 10 Pro',
+    agent_ver='1.2.3',
+    jitter_pct=20
+)
+```
+
+---
+
+### build_task_pull()
+
+Build a task polling message.
+
+```python
+build_task_pull(session_id: str) -> dict
+```
+
+<ParamField path="session_id" type="str" required>
+  Agent session identifier
+</ParamField>
+
+<ResponseField name="return" type="dict">
+  Message dict with `msg_type='TASK_PULL'`
+</ResponseField>
+
+**Example:**
+```python
+msg = build_task_pull(session_id='abc123')
+```
+
+---
+
+### build_task_result()
+
+Build a task execution result message.
+
+```python
+build_task_result(session_id: str, task_id: str, stdout: str,
+                  stderr: str, exit_code: int, duration_ms: int) -> dict
+```
+
+<ParamField path="session_id" type="str" required>
+  Agent session identifier
+</ParamField>
+
+<ParamField path="task_id" type="str" required>
+  Task identifier
+</ParamField>
+
+<ParamField path="stdout" type="str" required>
+  Standard output from command execution
+</ParamField>
+
+<ParamField path="stderr" type="str" required>
+  Standard error from command execution
+</ParamField>
+
+<ParamField path="exit_code" type="int" required>
+  Process exit code
+</ParamField>
+
+<ParamField path="duration_ms" type="int" required>
+  Task execution time in milliseconds
+</ParamField>
+
+<ResponseField name="return" type="dict">
+  Message dict with `msg_type='TASK_RESULT'` and execution details
+</ResponseField>
+
+**Example:**
+```python
+msg = build_task_result(
+    session_id='abc123',
+    task_id='task-456',
+    stdout='command output',
+    stderr='',
+    exit_code=0,
+    duration_ms=142
+)
+```
+
+## Internal Functions
+
+### _base_payload()
+
+<Note>Internal function - not part of public API</Note>
+
+Generate base message structure with mandatory fields.
+
+```python
+_base_payload(msg_type: str, session_id: str = None) -> dict
+```
+
+Returns dict with:
+- `msg_type`: Message type (validated against `VALID_MSG_TYPES`)
+- `session_id`: Optional session identifier
+- `timestamp`: Current Unix timestamp
+- `nonce`: UUID for replay protection
+- `payload`: Empty dict (populated by specific builders)
+
+## Security Features
+
+<CardGroup cols={2}>
+  <Card title="Authenticated Encryption" icon="shield-check">
+    All messages use AES-256-GCM for confidentiality and authenticity
+  </Card>
+  
+  <Card title="Replay Protection" icon="rotate-right">
+    Each message includes a unique UUID nonce stored server-side
+  </Card>
+  
+  <Card title="Length Obfuscation" icon="eye-slash">
+    Padding applied before encryption to hide plaintext size
+  </Card>
+  
+  <Card title="Version Control" icon="code-branch">
+    Protocol version in header enables future evolution
+  </Card>
+</CardGroup>
+
+## Error Handling
+
+<AccordionGroup>
+  <Accordion title="ProtocolError">
+    Raised for:
+    - Invalid payload structure
+    - Frame too short for header
+    - Bad magic bytes
+    - Unsupported protocol version
+    - Truncated frames
+    - Invalid JSON after decryption
+  </Accordion>
+  
+  <Accordion title="CryptoError">
+    Raised for:
+    - Authentication tag verification failure
+    - Tampered ciphertext
+    - Wrong decryption key
+  </Accordion>
+</AccordionGroup>
+
+## Dependencies
+
+```python
+import json
+import struct
+import time
+import uuid
+
+from common.crypto import decrypt, encrypt
+from common.utils import CryptoError, ProtocolError
+from evasion.padding_strat import pad, strip_padding
+from transport.traffic_profile import load_active_profile
+```
+
+## See Also
+
+- [Cryptography](/api/common/crypto) - Encryption and key derivation
+- [Padding Strategy](/api/evasion/padding-strat) - Traffic analysis resistance
+- [Traffic Profile](/api/transport/traffic-profile) - Configurable traffic patterns

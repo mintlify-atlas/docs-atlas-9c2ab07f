@@ -1,0 +1,217 @@
+---
+title: 'Cryptography'
+description: 'AES-GCM encryption, HKDF key derivation, and session key management'
+icon: 'lock'
+---
+
+## Overview
+
+The cryptography module provides secure encryption, decryption, and key derivation functions for the C2 framework. It uses **AES-256-GCM** for authenticated encryption and **HKDF-SHA256** for key derivation.
+
+**File:** `common/crypto.py`
+
+## Constants
+
+<ParamField path="NONCE_SIZE_BYTES" type="int" default="12">
+  Size of the nonce for AES-GCM encryption in bytes
+</ParamField>
+
+<ParamField path="KEY_SIZE_BYTES" type="int" default="32">
+  Required key size for AES-256 (32 bytes = 256 bits)
+</ParamField>
+
+<ParamField path="TAG_SIZE_BYTES" type="int" default="16">
+  Authentication tag length for GCM mode
+</ParamField>
+
+<ParamField path="HKDF_INFO" type="bytes" default="b'c2-framework-v1'">
+  Context label for HKDF to ensure domain separation
+</ParamField>
+
+## Functions
+
+### derive_key()
+
+Derive a cryptographic key from a pre-shared key using HKDF-SHA256.
+
+```python
+derive_key(psk: bytes, salt: bytes) -> bytes
+```
+
+<ParamField path="psk" type="bytes" required>
+  Pre-shared key material (must not be empty)
+</ParamField>
+
+<ParamField path="salt" type="bytes" required>
+  Salt value for key derivation (must not be empty)
+</ParamField>
+
+<ResponseField name="return" type="bytes">
+  Derived 32-byte key suitable for AES-256-GCM
+</ResponseField>
+
+**Raises:**
+- `CryptoError` - If PSK or salt is empty, or if derivation fails
+
+**Example:**
+```python
+from common.crypto import derive_key
+
+psk = b'my-secret-key-material-here'
+salt = b'unique-salt-value'
+key = derive_key(psk, salt)
+```
+
+---
+
+### encrypt()
+
+Encrypt plaintext using AES-256-GCM with a random nonce.
+
+```python
+encrypt(plaintext: bytes, key: bytes) -> tuple[bytes, bytes]
+```
+
+<ParamField path="plaintext" type="bytes" required>
+  Data to encrypt (must not be empty)
+</ParamField>
+
+<ParamField path="key" type="bytes" required>
+  32-byte AES-256 key
+</ParamField>
+
+<ResponseField name="return" type="tuple[bytes, bytes]">
+  A tuple of `(ciphertext_with_tag, nonce)` where:
+  - `ciphertext_with_tag`: Encrypted data with 16-byte authentication tag appended
+  - `nonce`: 12-byte nonce used for this encryption (must be sent with ciphertext)
+</ResponseField>
+
+**Raises:**
+- `CryptoError` - If plaintext is empty, key is wrong size, or encryption fails
+
+**Security Notes:**
+- A new random nonce is generated for each encryption
+- The nonce must be transmitted with the ciphertext (it's not secret)
+- Never reuse a nonce with the same key
+
+**Example:**
+```python
+from common.crypto import encrypt, derive_key
+
+key = derive_key(b'my-psk' * 8, b'salt')
+plaintext = b'sensitive data'
+ciphertext, nonce = encrypt(plaintext, key)
+```
+
+---
+
+### decrypt()
+
+Decrypt ciphertext using AES-256-GCM and verify authenticity.
+
+```python
+decrypt(ciphertext_with_tag: bytes, nonce: bytes, key: bytes) -> bytes
+```
+
+<ParamField path="ciphertext_with_tag" type="bytes" required>
+  Encrypted data with 16-byte authentication tag appended (must not be empty)
+</ParamField>
+
+<ParamField path="nonce" type="bytes" required>
+  12-byte nonce that was used during encryption
+</ParamField>
+
+<ParamField path="key" type="bytes" required>
+  32-byte AES-256 key (must match the key used for encryption)
+</ParamField>
+
+<ResponseField name="return" type="bytes">
+  Decrypted plaintext
+</ResponseField>
+
+**Raises:**
+- `CryptoError` - If ciphertext is empty, nonce/key wrong size, authentication fails, or decryption fails
+
+**Security Notes:**
+- The authentication tag is automatically verified
+- If the ciphertext has been tampered with, `CryptoError` is raised
+- Wrong key also raises `CryptoError` due to tag verification failure
+
+**Example:**
+```python
+from common.crypto import decrypt
+
+plaintext = decrypt(ciphertext, nonce, key)
+```
+
+---
+
+### get_session_key()
+
+Convenience function to get a ready-to-use session key from configuration.
+
+```python
+get_session_key() -> bytes
+```
+
+<ResponseField name="return" type="bytes">
+  32-byte session key derived from `config.PRE_SHARED_KEY`
+</ResponseField>
+
+**Raises:**
+- `CryptoError` - If `config.PRE_SHARED_KEY` is not exactly 32 bytes
+
+**Implementation:**
+- Reads `PRE_SHARED_KEY` from `common.config`
+- Derives key using HKDF with fixed salt `b'c2-lab-fixed-salt-v1'`
+- Validates key length before derivation
+
+**Example:**
+```python
+from common.crypto import get_session_key, encrypt
+
+key = get_session_key()
+ciphertext, nonce = encrypt(b'data', key)
+```
+
+## Error Handling
+
+All cryptographic errors raise `CryptoError` (from `common.utils`). This includes:
+- Invalid parameters (empty, wrong size)
+- Key derivation failures
+- Encryption/decryption failures
+- Authentication tag verification failures (tampered data)
+
+## Security Properties
+
+<CardGroup cols={2}>
+  <Card title="Authenticated Encryption" icon="shield-check">
+    AES-GCM provides both confidentiality and authenticity. Tampering is automatically detected.
+  </Card>
+  
+  <Card title="Nonce Uniqueness" icon="fingerprint">
+    Each encryption uses a cryptographically random 12-byte nonce, ensuring security even with key reuse.
+  </Card>
+  
+  <Card title="Key Derivation" icon="key">
+    HKDF-SHA256 with domain separation ensures derived keys are cryptographically independent.
+  </Card>
+  
+  <Card title="Constant-Time Operations" icon="clock">
+    Uses `cryptography` library which provides timing-attack resistant implementations.
+  </Card>
+</CardGroup>
+
+## Dependencies
+
+```python
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+```
+
+## See Also
+
+- [Message Format](/api/common/message-format) - Uses crypto functions for envelope encryption
+- [Configuration](/api/common/config) - Defines `PRE_SHARED_KEY`
+- [Common Utilities](/api/common/utils) - Defines `CryptoError` exception
