@@ -1,0 +1,239 @@
+---
+title: "Exception Hierarchy"
+description: "Custom exception classes for error handling across the framework"
+icon: "triangle-exclamation"
+---
+
+## Overview
+
+Module: `common/utils.py`
+
+The C2 Framework uses a custom exception hierarchy to distinguish framework errors from standard Python exceptions. All framework modules raise these typed exceptions instead of built-in exceptions, making error handling more precise and preventing accidental catches of unrelated errors.
+
+## Exception Hierarchy
+
+```
+C2Error (base)
+├── CryptoError
+├── ProtocolError
+├── TransportError
+└── EnvironmentError
+```
+
+## Base Exception
+
+### C2Error
+
+```python
+class C2Error(Exception)
+```
+
+Base exception for all framework errors. Catch this in the beacon loop to handle any framework failure without crashing the agent process.
+
+**Usage:**
+
+```python
+from common.utils import C2Error
+
+try:
+    # Framework operation
+    pass
+except C2Error as e:
+    logger.error('framework error', extra={'reason': str(e)})
+    # Handle gracefully without crashing
+```
+
+## Specialized Exceptions
+
+### CryptoError
+
+```python
+class CryptoError(C2Error)
+```
+
+Raised by `common/crypto.py` on any cryptographic failure.
+
+**Covers:**
+- AES-GCM authentication tag verification failure (tampered ciphertext)
+- Invalid key length
+- Invalid nonce length
+- Any internal cryptography library error
+
+<Note>
+Raw exception messages from the cryptography library are logged server-side only for security.
+</Note>
+
+**Example:**
+
+```python
+from common.utils import CryptoError
+from common.crypto import decrypt
+
+try:
+    plaintext = decrypt(ciphertext, nonce, key)
+except CryptoError as e:
+    logger.warning('decryption failed', extra={'reason': str(e)})
+    # Could indicate tampering or wrong key
+```
+
+### ProtocolError
+
+```python
+class ProtocolError(C2Error)
+```
+
+Raised by `common/message_format.py` on any protocol-level failure.
+
+**Covers:**
+- Wrong magic bytes in envelope header
+- Unsupported protocol version
+- Truncated or malformed envelope
+- Invalid JSON in decrypted payload
+- Missing required fields in payload dict
+
+**Example:**
+
+```python
+from common.utils import ProtocolError
+from common import message_format as mf
+
+try:
+    payload = mf.unpack(raw_body, session_key)
+except ProtocolError as e:
+    logger.warning('protocol error', extra={'reason': str(e)})
+    return JSONResponse(status_code=400, content={'error': 'bad request'})
+```
+
+### TransportError
+
+```python
+class TransportError(C2Error):
+    def __init__(self, message: str, status_code: int = None)
+```
+
+Raised by `transport/http_transport.py` on any network failure.
+
+**Covers:**
+- Connection refused or timed out
+- HTTP 4xx or 5xx response from server
+- Host not in `ALLOWED_HOSTS` (hard safety control)
+- TLS certificate verification failure
+
+**Attributes:**
+
+<ParamField path="status_code" type="int | None">
+  HTTP status code if the error came from an HTTP response
+</ParamField>
+
+**Example:**
+
+```python
+from common.utils import TransportError
+from transport.http_transport import send_beacon
+
+try:
+    response = send_beacon(endpoint, packed_message)
+except TransportError as e:
+    logger.warning('transport error', extra={
+        'reason': str(e),
+        'status_code': e.status_code,
+    })
+    # Trigger backoff retry logic
+```
+
+### EnvironmentError
+
+```python
+class EnvironmentError(C2Error)
+```
+
+Raised by `agent/environment_checks.py` when the lab gate fails.
+
+**Covers:**
+- `LAB_MODE` environment variable not set to '1'
+- Target host not in `ALLOWED_HOSTS`
+
+<Warning>
+This exception causes the agent to exit immediately with `sys.exit(1)` to prevent accidental deployment outside the lab.
+</Warning>
+
+**Example:**
+
+```python
+from common.utils import EnvironmentError
+from agent.environment_checks import check_lab_environment
+
+try:
+    check_lab_environment()
+except EnvironmentError as e:
+    logger.error('environment check failed', extra={'reason': str(e)})
+    sys.exit(1)
+```
+
+## Error Handling Patterns
+
+### Beacon Loop Error Handling
+
+```python
+from common.utils import C2Error, TransportError, ProtocolError
+
+while True:
+    try:
+        # Send beacon
+        response = _send(pull_payload, self._key)
+        
+    except TransportError as e:
+        # Network failure - back off and retry
+        logger.warning('transport error', extra={'reason': str(e)})
+        self._backoff_sleep(reason=str(e))
+        
+    except ProtocolError as e:
+        # Protocol error - log and continue
+        logger.error('protocol error', extra={'reason': str(e)})
+        
+    except C2Error as e:
+        # Any other framework error
+        logger.error('framework error', extra={'reason': str(e)})
+```
+
+### Server Request Handling
+
+```python
+from common.utils import CryptoError, ProtocolError
+
+try:
+    session_key = get_session_key()
+    payload = mf.unpack(raw_body, session_key)
+    
+except (ProtocolError, CryptoError) as e:
+    logger.warning('unpack failed', extra={
+        'error_type': type(e).__name__,
+        'error_msg': str(e),
+    })
+    return JSONResponse(status_code=400, content={'error': 'bad request'})
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Catch Specific Exceptions" icon="bullseye">
+    Catch the most specific exception type possible for targeted error handling
+  </Card>
+  <Card title="Always Log Context" icon="clipboard-list">
+    Include relevant context in structured logs (session_id, task_id, etc.)
+  </Card>
+  <Card title="Don't Expose Details" icon="shield">
+    Return generic error messages to clients; log full details server-side only
+  </Card>
+  <Card title="Use C2Error for Catch-All" icon="umbrella">
+    Catch C2Error as a fallback to handle any framework error gracefully
+  </Card>
+</CardGroup>
+
+## Related APIs
+
+- [Crypto](/api/common/crypto) - Raises CryptoError
+- [Message Format](/api/common/message-format) - Raises ProtocolError
+- [HTTP Transport](/api/transport/http-transport) - Raises TransportError
+- [Environment Checks](/api/agent/environment-checks) - Raises EnvironmentError
+- [Beacon Loop](/api/agent/beacon) - Handles all exception types

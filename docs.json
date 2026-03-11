@@ -114,7 +114,8 @@
               "api/common/crypto",
               "api/common/message-format",
               "api/common/config",
-              "api/common/logger"
+              "api/common/logger",
+              "api/common/utils"
             ]
           },
           {
