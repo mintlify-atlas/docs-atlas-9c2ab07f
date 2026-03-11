@@ -1,0 +1,162 @@
+{
+  "projectType": "framework",
+  "projectName": "C2 Framework",
+  "projectDescription": "A Python-based command and control framework for cybersecurity research with built-in evasion techniques and traffic analysis capabilities.",
+  "theme": "aspen",
+  "primaryColor": "#DC143C",
+  "lightColor": "#FF6B6B",
+  "darkColor": "#8B0000",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "introduction",
+              "research-disclaimer",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Getting Started",
+            "pages": [
+              "getting-started/installation",
+              "getting-started/lab-setup",
+              "getting-started/quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/agent-server-model",
+              "concepts/communication-protocol",
+              "concepts/cryptography",
+              "concepts/session-management"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker-deployment",
+              "deployment/network-configuration",
+              "deployment/redirector-setup",
+              "deployment/tls-certificates"
+            ]
+          },
+          {
+            "group": "Operator Guide",
+            "pages": [
+              "operator/console-interface",
+              "operator/session-management",
+              "operator/task-execution",
+              "operator/viewing-results"
+            ]
+          },
+          {
+            "group": "Evasion Techniques",
+            "pages": [
+              "evasion/overview",
+              "evasion/jitter-strategies",
+              "evasion/traffic-padding",
+              "evasion/header-randomization",
+              "evasion/traffic-profiles"
+            ]
+          },
+          {
+            "group": "Telemetry & Analysis",
+            "pages": [
+              "telemetry/traffic-capture",
+              "telemetry/flow-analysis",
+              "telemetry/feature-extraction",
+              "telemetry/experiments"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Server",
+            "pages": [
+              "api/server/server-main",
+              "api/server/session-manager",
+              "api/server/command-queue",
+              "api/server/storage"
+            ]
+          },
+          {
+            "group": "Agent",
+            "pages": [
+              "api/agent/agent-main",
+              "api/agent/beacon",
+              "api/agent/executor",
+              "api/agent/environment-checks"
+            ]
+          },
+          {
+            "group": "Common",
+            "pages": [
+              "api/common/crypto",
+              "api/common/message-format",
+              "api/common/config",
+              "api/common/logger"
+            ]
+          },
+          {
+            "group": "Transport",
+            "pages": [
+              "api/transport/http-transport",
+              "api/transport/tls-wrapper",
+              "api/transport/traffic-profile"
+            ]
+          },
+          {
+            "group": "Evasion",
+            "pages": [
+              "api/evasion/header-randomizer",
+              "api/evasion/padding-strategy",
+              "api/evasion/sleep-strategy"
+            ]
+          },
+          {
+            "group": "Telemetry",
+            "pages": [
+              "api/telemetry/traffic-capture",
+              "api/telemetry/flow-parser",
+              "api/telemetry/feature-extractor"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Encrypted agent-server communication using AES-GCM",
+    "FastAPI-based server with async session management",
+    "Configurable traffic evasion (jitter, padding, header randomization)",
+    "Docker-based deployment with nginx redirector",
+    "Command execution with security controls and blocklists",
+    "Built-in telemetry and traffic analysis tools",
+    "Network flow analysis and feature extraction",
+    "Lab environment safety checks"
+  ],
+  "publicApiSurface": [
+    "server.server_main.beacon - Main beacon endpoint for agent communication",
+    "server.api_interface.run_repl - Operator console REPL",
+    "agent.beacon.BeaconLoop - Agent beacon loop implementation",
+    "agent.executor.execute - Command execution with security controls",
+    "common.crypto.encrypt - AES-GCM encryption",
+    "common.crypto.decrypt - AES-GCM decryption",
+    "common.message_format.pack - Pack and encrypt messages",
+    "common.message_format.unpack - Decrypt and unpack messages",
+    "evasion.header_randomizer.get_headers - Generate randomized HTTP headers",
+    "evasion.sleep_strat.get_sleep_fn - Get jitter sleep function",
+    "transport.http_transport.send_beacon - Send HTTP beacon request",
+    "telemetry.traffic_capture.start_capture - Start PCAP capture",
+    "telemetry.flow_parser.parse_pcap - Parse PCAP files",
+    "telemetry.feature_extractor.extract_features - Extract traffic features"
+  ]
+}
